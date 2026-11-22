@@ -88,6 +88,18 @@ def named_files(archive, paths, directory, mode):
     return filenames
 
 
+def module_release(modules):
+    releases = set()
+    for path in modules:
+        magic = subprocess.check_output(["modinfo", "-F", "vermagic", path.resolve()], text=True).split()
+        if not magic or not magic[0].isascii():
+            raise ValueError(f"module has no usable vermagic: {path}")
+        releases.add(magic[0])
+    if len(releases) > 1:
+        raise ValueError("supplied modules do not share one kernel release")
+    return next(iter(releases), "")
+
+
 def pack(args, rootfs, tmp):
     busybox = shutil.which(args.busybox)
     if not busybox:
@@ -112,6 +124,7 @@ def pack(args, rootfs, tmp):
         if any(path.suffix != ".ko" for path in modules):
             raise ValueError("guest modules must be uncompressed .ko files")
         names = named_files(archive, modules, "modules", 0o444)
+        text_entry(archive, "kernel-test/module-release", [module_release(modules)])
         text_entry(archive, "kernel-test/preload", names[:len(args.module)])
         text_entry(archive, "kernel-test/late", names[len(args.module):])
         text_entry(archive, "kernel-test/mode", [args.mode])

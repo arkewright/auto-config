@@ -1,0 +1,3 @@
+# SPDX-License-Identifier: GPL-2.0-only
+obj-m := kcfg_initializer_test.o
+ccflags-y += -include $(KCFG_HEADER)

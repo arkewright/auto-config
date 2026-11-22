@@ -52,7 +52,11 @@ status_ready=1
 . /etc/os-release
 [ "$ID" = ubuntu ]
 IFS= read -r mode < /kernel-test/mode
-printf 'distro=%s\nversion=%s\nkernel=%s\nmode=%s\n' "$ID" "$VERSION_ID" "$(uname -r)" "$mode" >&3
+release=$(uname -r)
+printf 'distro=%s\nversion=%s\nkernel=%s\nmode=%s\n' "$ID" "$VERSION_ID" "$release" "$mode" >&3
+stage=module-release
+IFS= read -r expected < /kernel-test/module-release
+[ -z "$expected" ] || [ "$expected" = "$release" ] || exit 1
 stage=preload
 while IFS= read -r module; do
     "$control" insmod "$KERNEL_TEST_MODULES/$module"
