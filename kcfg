@@ -1,0 +1,46 @@
+#!/usr/bin/env bash
+# Host commands for an x86_64 builder and a riscv64 board.
+set -euo pipefail
+
+usage() {
+    printf '%s\n' \
+        'Usage: ./kcfg COMMAND' \
+        '  fetch                         fetch missing source dependencies' \
+        '  tools                         fetch, build or reuse LLVM, build plugin and processor' \
+        '  config                        native allyesconfig, then necessary board adjustments' \
+        '  build baseline|profile|candidate  build the image, modules and device trees' \
+        '  pack baseline|profile|candidate   write WORK/packages/<kind>.tar.gz' \
+        '  plan [TRACE] [--also TRACE]... [--review]  propose changes (default: WORK/trace.tsv)' \
+        '  compare                       compare baseline and candidate packages and boot times' \
+        'Settings and board commands: docs/riscv64-board.md and docs/usage.md'
+}
+
+case ${1:-help} in help|-h|--help) usage; exit 0 ;; esac
+command=$1; shift
+case $command in
+    fetch|tools|config|compare) [[ $# == 0 ]] || { usage >&2; exit 2; } ;;
+    build|pack) [[ $# == 1 && $1 =~ ^(baseline|profile|candidate)$ ]] || { usage >&2; exit 2; } ;;
+    plan) ;;
+    *) usage >&2; exit 2 ;;
+esac
+
+ROOT=$(cd -- "$(dirname -- "$0")" && pwd -P)
+DEPS=$(realpath -m -- "${DEPS:-$ROOT/.deps}")
+WORK=$(realpath -m -- "${WORK:-$ROOT/build/board}")
+LINUX=$(realpath -m -- "${LINUX:-$DEPS/linux}")
+SDK=$(realpath -m -- "${SDK:-$DEPS/llvm}")
+HOST_BUILD=$(realpath -m -- "${HOST_BUILD:-$ROOT/build/host}")
+export ROOT DEPS WORK LINUX SDK HOST_BUILD
+export JOBS=${JOBS:-8} IMAGE_TARGET=${IMAGE_TARGET:-Image} PYTHON=${PYTHON:-python3}
+export PATH="$SDK/bin:$PATH" LD_LIBRARY_PATH="$SDK/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+case $command in
+    fetch|tools) exec bash "$ROOT/scripts/host/tools.sh" "$command" ;;
+    config|build) exec bash "$ROOT/scripts/host/kernel.sh" "$command" "$@" ;;
+    pack) exec bash "$ROOT/scripts/host/pack.sh" "$@" ;;
+    plan)
+        trace="$WORK/trace.tsv"
+        if [[ $# -gt 0 && $1 != -* ]]; then trace=$1; shift; fi
+        exec "$HOST_BUILD/processor/kcfg-plan" "$WORK/profile/campaign" "$trace" "$WORK/plan" "$@" ;;
+    compare) exec "$PYTHON" -I "$ROOT/scripts/host/compare.py" "$WORK" ;;
+esac

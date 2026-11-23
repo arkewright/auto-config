@@ -17,4 +17,6 @@ if(BUILD_TESTING)
   find_package(Python3 3.11 REQUIRED COMPONENTS Interpreter)
   add_test(NAME kbuild-contract COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/tests/test_kernel.py)
   add_test(NAME ubuntu-transport COMMAND ${Python3_EXECUTABLE} -I ${CMAKE_CURRENT_SOURCE_DIR}/qemu/test_guest.py)
+  add_test(NAME board-workflow COMMAND ${Python3_EXECUTABLE} -I -m unittest discover
+    -s ${CMAKE_CURRENT_SOURCE_DIR}/tests -p "test_board*.py")
 endif()

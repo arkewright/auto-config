@@ -15,6 +15,7 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DRIVER = ROOT / "driver"
+CAPTURE_CONFIG = {"CONFIG_MODULES": "y", "CONFIG_TRACEPOINTS": "y", "CONFIG_TRIM_UNUSED_KSYMS": "n"}
 SYMBOL = r"CONFIG_[A-Za-z0-9_]+"
 MODULE = r"[A-Za-z0-9_][A-Za-z0-9_-]*"
 SOURCE = r"(?:[A-Za-z0-9_+-]+/)+[A-Za-z0-9_+-]+\.c"
@@ -119,6 +120,37 @@ class Toolchain:
                         f"CC={cc or self.cc}", *targets], check=True, env=self.env)
 
 
+def apply_values(path, values):
+    changes = {key: f"# {key} is not set" if value == "n" else f"{key}={value}" for key, value in values.items()}
+    lines = path.read_text().splitlines()
+    for n, line in enumerate(lines):
+        match = re.match(rf"(?:# )?({SYMBOL})(?:=| is not set$)", line)
+        if match and match[1] in changes:
+            lines[n] = changes.pop(match[1])
+    path.write_text("\n".join([*lines, *changes.values()]) + "\n")
+
+
+def board_config(args, kit):
+    out = fresh(args.out)
+    cfg = out / ".config"
+    kit.make(out, "allyesconfig")
+    shutil.copyfile(cfg, out / "native.config")
+    native = config_values(cfg)
+    wanted = config_values(args.fragment) if args.fragment else {}
+    for key, value in CAPTURE_CONFIG.items():
+        require(wanted.setdefault(key, value) == value, f"profiling requires {key}={value}")
+    apply_values(cfg, {k: v for k, v in wanted.items() if native.get(k, "n") != v})
+    kit.make(out, "olddefconfig")
+    actual = config_values(cfg)
+    same_config(wanted, {k: actual.get(k, "n") for k in wanted}, "Kconfig rejected board requirements")
+    with (out / "changes.tsv").open("w") as diff:
+        for key in sorted(native.keys() | actual.keys()):
+            before, after = native.get(key, "n"), actual.get(key, "n")
+            if before != after:
+                print(key, before, after, sep="\t", file=diff)
+    print(f"Board baseline: {cfg}; changes from native allyesconfig: {out / 'changes.tsv'}")
+
+
 def configure(args, kit):
     fragments = {}
     for path in args.fragment:
@@ -130,21 +162,18 @@ def configure(args, kit):
             require(key in fragments, f"cannot unpin absent option: {key}")
             del fragments[key]
     out = fresh(args.out)
-    fragment = out / "board.fragment"
-    overrides = {key: (f"# {key} is not set" if val == "n" else f"{key}={val}") for key, val in fragments.items()}
-    fragment.write_text("".join(line + "\n" for line in overrides.values()))
     if args.base in {"allyesconfig", "allnoconfig", "alldefconfig", "allmodconfig"}:
-        kit.make(out, f"KCONFIG_ALLCONFIG={fragment}", args.base)
+        overrides = []
+        if fragments:
+            fragment = out / "board.fragment"
+            fragment.touch()
+            apply_values(fragment, fragments)
+            overrides.append(f"KCONFIG_ALLCONFIG={fragment}")
+        kit.make(out, *overrides, args.base)
     else:
         require(re.fullmatch(r"(?:[\w-]+_)?defconfig", args.base), "invalid base target")
         kit.make(out, args.base)
-        cfg = out / ".config"
-        lines = cfg.read_text().splitlines()
-        for n, line in enumerate(lines):
-            match = re.match(rf"(?:# )?({SYMBOL})(?:=| is not set$)", line)
-            if match and match[1] in overrides:
-                lines[n] = overrides.pop(match[1])
-        cfg.write_text("\n".join([*lines, *overrides.values()]) + "\n")
+        apply_values(out / ".config", fragments)
         kit.make(out, "olddefconfig")
     actual = config_values(out / ".config")
     same_config(fragments, {s: actual.get(s, "n") for s in fragments}, "Kconfig rejected board requirements")
@@ -259,6 +288,9 @@ def inventory(args):
     base = (linux / args.under).resolve(strict=True)
     require(base.is_relative_to(linux) and base.is_dir(), "--under must name a Linux source directory")
     directories = {p.parent for name in ("Makefile", "Kbuild") for p in base.rglob(name)}
+    drop, defer = set(args.drop), set(args.defer)
+    require(not drop & defer, f"conflicting policies: {', '.join(sorted(drop & defer))}")
+    selected = set(args.symbol) | drop | defer
     rows = []
     for directory in sorted(directories):
         for src, symbols in sorted(literal_bindings(directory).items()):
@@ -266,18 +298,24 @@ def inventory(args):
             if len(symbols) != 1 or not supported_source(path):
                 continue
             symbol, = symbols
-            if not args.symbol or symbol in args.symbol:
-                rows.append((symbol, src.stem.replace("-", "_"), path))
-    require(0 < len(rows) <= 65535, "no direct bindings or inventory too large; choose a subsystem")
+            rows.append((symbol, src.stem.replace("-", "_"), path))
     counts, owners = {}, {}
     for symbol, module, _ in rows:
         counts[symbol] = counts.get(symbol, 0) + 1
         owners.setdefault(module, set()).add(symbol)
-    with args.out.open("x") as output:
-        output.write("# id\tKconfig symbol\tmodule\tpolicy\ttranslation unit\n")
-        for i, (symbol, module, path) in enumerate(rows, 1):
-            name = module if counts[symbol] == 1 and len(owners[module]) == 1 else "-"
-            output.write(f"{i}\t{symbol}\t{name}\tkeep\t{path}\n")
+    if selected:
+        missing = selected - counts.keys()
+        require(not missing, f"no direct binding for {', '.join(sorted(missing))}; supply an audited scope instead")
+        rows = [row for row in rows if row[0] in selected]
+    require(0 < len(rows) <= 65535, "no direct bindings or inventory too large; choose a subsystem")
+    output = ["# id\tKconfig symbol\tmodule\tpolicy\ttranslation unit\n"]
+    for i, (symbol, module, path) in enumerate(rows, 1):
+        name = module if counts[symbol] == 1 and len(owners[module]) == 1 else "-"
+        policy = "drop" if symbol in drop else "defer" if symbol in defer else "keep"
+        require(policy != "defer" or name != "-", f"no unique module for {symbol}; supply an audited scope instead")
+        output.append(f"{i}\t{symbol}\t{name}\t{policy}\t{path}\n")
+    with args.out.open("x") as stream:
+        stream.writelines(output)
 
 
 def attest_objects(kit, campaign, obj, rows, values, symbol):
@@ -315,6 +353,12 @@ def attest_objects(kit, campaign, obj, rows, values, symbol):
     (campaign / "coverage.tsv").write_text("".join(cover))
 
 
+def build_targets(arch, image):
+    if arch in {"riscv", "arm64", "arm"}:
+        return (image or ("zImage" if arch == "arm" else "Image"), "modules", "dtbs")
+    return (image or "bzImage", "modules")
+
+
 def profile(args, kit):
     rows = read_scope(args.scope, kit.linux)
     plugin = args.plugin.resolve(strict=True)
@@ -325,7 +369,7 @@ def profile(args, kit):
     kit.make(obj, "olddefconfig")
     values = config_values(obj / ".config")
     same_config(config_values(args.baseline), values, "baseline is not normalized for this target")
-    for sym, val in {"CONFIG_MODULES": "y", "CONFIG_TRACEPOINTS": "y", "CONFIG_TRIM_UNUSED_KSYMS": "n"}.items():
+    for sym, val in CAPTURE_CONFIG.items():
         require(values.get(sym, "n") == val, f"profiling requires {sym}={val}")
     shutil.copyfile(obj / ".config", campaign / "baseline.config")
     shutil.copyfile(args.scope, campaign / "scope.tsv")
@@ -338,7 +382,7 @@ def profile(args, kit):
     wrapper = compiler_wrapper(kit, campaign, plugin, rows)
     release_suffix = f"LOCALVERSION=-kcfg-{key[:16]}"
     kit.make(obj, release_suffix, "init/init_task.o", cc=wrapper)
-    kit.make(obj, release_suffix, args.image_target, "modules", cc=wrapper)
+    kit.make(obj, release_suffix, *build_targets(kit.arch, args.image_target), cc=wrapper)
     mod = fresh(out / "driver")
     kit.make(obj, release_suffix, f"M={DRIVER}", f"MO={mod}", "modules")
     require((mod / "kcfg_collect.ko").is_file(), "collector not built")
@@ -355,7 +399,7 @@ def plain(args, kit):
     shutil.copyfile(args.baseline, obj / ".config")
     kit.make(obj, "olddefconfig")
     same_config(config_values(args.baseline), config_values(obj / ".config"), "baseline changed")
-    kit.make(obj, args.image_target, "modules")
+    kit.make(obj, *build_targets(kit.arch, args.image_target))
     print(f"Pristine baseline build: {obj}")
 
 
@@ -427,7 +471,7 @@ def candidate(args, kit):
     shutil.copyfile(plan / "requested.config", obj / ".config")
     kit.make(obj, "olddefconfig")
     same_config(wanted, config_values(obj / ".config"), "Kconfig coerced the proposal; no final configuration published")
-    kit.make(obj, args.image_target, "modules")
+    kit.make(obj, *build_targets(kit.arch, args.image_target))
     same_config(wanted, config_values(obj / ".config"), "configuration changed during build")
     paths = module_paths(obj, modules)
     (out / "deferred-paths.txt").write_text("".join(f"kernel/{p}\n" for p in paths))
@@ -440,7 +484,9 @@ def candidate(args, kit):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="mode", required=True)
-    scan = sub.add_parser("inventory", help="draft a keep-only inventory from literal Kbuild rules")
+    scan = sub.add_parser("inventory", help="map selected symbols to files using literal Kbuild rules")
+    scan.add_argument("--drop", action="append", default=[], metavar="CONFIG_NAME")
+    scan.add_argument("--defer", action="append", default=[], metavar="CONFIG_NAME")
     linux = os.environ.get("LINUX", ROOT / ".deps/linux")
     scan.add_argument("--linux", type=Path, default=linux, help="Linux source tree (default: $LINUX or .deps/linux)")
     scan.add_argument("--under", required=True, help="subsystem directory relative to Linux")
@@ -457,6 +503,8 @@ def main():
     common.add_argument("--arch", default="x86_64")
     common.add_argument("--jobs", default=max(1, min(8, len(os.sched_getaffinity(0)))), type=int)
     common.add_argument("--out", required=True, type=Path, help="new output directory")
+    native = sub.add_parser("board-config", parents=[common], help="start with native allyesconfig, then apply board requirements")
+    native.add_argument("--fragment", type=Path, help="optional board adjustments applied after native allyesconfig")
     conf = sub.add_parser("configure", parents=[common])
     conf.add_argument("--base", default="defconfig", help="allyesconfig, allnoconfig, alldefconfig, allmodconfig or architecture defconfig")
     conf.add_argument("--fragment", action="append", type=Path, default=[])
@@ -472,12 +520,13 @@ def main():
     final.add_argument("--plan", type=Path, required=True)
     for cmd in (prof, final, reference):
         cmd.add_argument("--image-target", choices=("bzImage", "Image", "Image.gz", "Image.lz4", "vmlinuz.efi", "zImage"),
-                         default="bzImage", help="Kbuild boot image target, e.g. Image for arm64")
+                         help="Kbuild boot image (default: Image on RISC-V/arm64, zImage on ARM, bzImage on x86)")
     args = parser.parse_args()
     if args.mode == "inventory":
         inventory(args)
         return
-    {"configure": configure, "profile": profile, "candidate": candidate, "plain": plain}[args.mode](args, Toolchain(args))
+    actions = {"board-config": board_config, "configure": configure, "profile": profile, "candidate": candidate, "plain": plain}
+    actions[args.mode](args, Toolchain(args))
 
 
 if __name__ == "__main__":

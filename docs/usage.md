@@ -1,134 +1,76 @@
-# 使用指南：从板级基线到候选内核
+# 脚本使用说明
+
+第一次使用按[实板操作流程](riscv64-board.md)运行。本页解释每条命令的输入、输出和可调整的设置。`./kcfg` 在 x86_64 主机运行；包里的 `install` 和 `run` 在 riscv64 板上运行。
+
+## 主机命令
+
+| 命令 | 输入与结果 |
+|---|---|
+| `./kcfg fetch` | 获取缺少的 Linux 和 FTXUI 源码。需要自建 LLVM 时一并获取 LLVM 源码。 |
+| `./kcfg tools` | 自动执行上述准备；构建或复用 LLVM，再编译 Clang 插件和配置处理器。两者都在主机上运行。 |
+| `./kcfg config` | 在空目录运行上游 `allyesconfig`，保留原件 `config/native.config`，应用采集前提和可选板级片段后执行 `olddefconfig`，输出 `config/.config` 和逐项差异 `config/changes.tsv`。 |
+| `./kcfg build baseline` | 用基线配置交叉编译未插桩的镜像、模块和设备树。 |
+| `./kcfg build profile` | 用同一基线和板级策略构建采集内核、树外采集驱动及 `profile/campaign/`。该目录留在主机。 |
+| `./kcfg plan` | 读取 `profile/campaign/` 和传回的 `trace.tsv`，在 `plan/` 生成配置请求、理由和延迟模块清单。 |
+| `./kcfg build candidate` | 应用配置请求，核对 Kconfig 依赖，构建不带插桩的内核。成功后发布最终的 `candidate/.config`。 |
+| `./kcfg pack baseline`、`profile` 或 `candidate` | 将对应的已构建镜像、运行模块、设备树和板端命令打成 `packages/<角色>.tar.gz`。 |
+| `./kcfg compare` | 读取基线和候选的安装包及传回的 `baseline.tsv`、`candidate.tsv`，输出包大小和启动时间对比。 |
+
+表中产物路径相对于 `WORK`。每轮选一个短且唯一的目录名（如 `board-01`），基线与候选用它区分内核发行版本；更换源码、基线、策略或重做采集构建时，换新 `WORK`。同一采集构建可在不同启动中观测多个负载。
 
 ## 准备工具链
 
-宿主机需要 just、uv、Python 3.11 或更高版本、CMake 3.30 或更高版本、Ninja，以及目标内核的 Kbuild 依赖。常用依赖包括 GNU Make、flex、bison、bc、Perl、libelf、kmod 和编解码工具；下载源码时需要 Git，启用内核模块签名时还需相应的密码库开发文件。虚拟机依赖见 [QEMU 验证器](../qemu/README.md#准备环境)。
+从仓库根目录复制 `examples/board.env` 后按需设置，再执行 `source ./board.env`。源码、工具链和宿主构建目录可以位于仓库外。以下路径建议填绝对路径。
 
-```sh
-just sources
-SDK="$PWD/.deps/llvm"
-SDK="$SDK" just check
-```
-
-`just sources` 复用已有源码并准备 Ubuntu 镜像。仅在源码目录缺失时克隆：Linux、LLVM 源码和 FTXUI 默认分别取 `v7.4-rc3`、`llvmorg-23.1.4` 和 `v6.1.9`。首次下载可设置 `LINUX_REF`、`LLVM_REF`、`FTXUI_REF`，或传给 `tools/sources.py` 对应的 `--linux-ref`、`--llvm-ref`、`--ftxui-ref`，选择其他标签或分支。脚本不切换已有源码；要并存多个版本，用 `--cache` 指定新目录。
-
-已有板厂源码可用 `LINUX` 指定，`just sources` 直接复用，无需 Git 标签或 `.git` 目录。已有 LLVM 开发套件用 `SDK` 指定，例如 `SDK="$(llvm-config --prefix)" just check`。内核工具也接受显式的 `--linux` 和 `--llvm`。用同一套 Clang 可执行文件、头文件和库编译并加载插件；切换工具链时使用新的 `HOST_BUILD` 目录。需要从源码构建时：
-
-```sh
-tools/sources.py --llvm-source
-SDK="$PWD/.deps/llvm-local"
-cmake -S .deps/llvm-project/llvm -B build/llvm-sdk -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$SDK" \
-  -DLLVM_ENABLE_PROJECTS='clang;lld' -DLLVM_TARGETS_TO_BUILD='X86;AArch64' \
-  -DLLVM_BUILD_LLVM_DYLIB=ON -DLLVM_LINK_LLVM_DYLIB=ON -DCLANG_LINK_CLANG_DYLIB=ON
-cmake --build build/llvm-sdk --target install --parallel 8
-SDK="$SDK" just check
-```
-
-| 构建部分 | 选择编译器和运行库 |
+| 变量 | 默认值与用法 |
 |---|---|
-| C++26 插件与处理器 | `just host` 接受 `SDK`、`CC`、`CXX`、`SYSROOT`、`FTXUI_SOURCE_DIR`、`JOBS` 与 `HOST_BUILD`。自选 glibc 时使用包含头文件、加载器、C++ 标准库和依赖的完整系统根。 |
-| 内核与树外驱动 | `tools/kernel.py` 接受 `--llvm` 和 `--cc`；`--hostcc`、`--hostcxx` 和 `--host-sysroot` 用于构建 Kbuild 宿主工具。内核与驱动由 GNU C 编译，不链接 glibc。 |
-| 客体负载 | glibc 由 Ubuntu 根文件系统决定，用 `--rootfs` 指定可信来源的本地归档。 |
+| `DEPS` | 下载和构建依赖的目录，默认 `.deps/`。 |
+| `LINUX` | 默认 `DEPS/linux`。可指向板厂源码、发布归档的解包目录或本地检出。 |
+| `LLVM_SOURCE`、`SDK` | 源码默认 `DEPS/llvm-project`，安装前缀默认 `DEPS/llvm`。已有带开发头文件、库及 RISC-V 后端的 SDK 时，直接设 `SDK`；要自建，选源码并把 `SDK` 指向新前缀。 |
+| `FTXUI_SOURCE_DIR`、`FTXUI_DIR` | 前者指定源码，后者指定已安装的 FTXUI 包所在的 CMake 配置目录。优先用指定源码；两者均未设置时默认取 `DEPS/ftxui`。 |
+| `LINUX_REF`、`LLVM_REF`、`FTXUI_REF` | 首次下载用的分支或标签，默认分别为 `v7.4-rc3`、`llvmorg-23.1.4`、`v6.1.9`。已有源码直接使用。 |
+| `JOBS`、`LLVM_BUILD`、`HOST_BUILD` | 并行数默认 8，LLVM 编译目录默认 `DEPS/llvm-build`，插件和处理器默认 `build/host`。切换编译器时为宿主工具选新构建目录。 |
+| `BOOTSTRAP_CC`、`BOOTSTRAP_CXX` | 从源码编译 LLVM 的宿主编译器，默认 `cc`、`c++`。 |
+| `CC`、`CXX` | 编译插件和处理器，默认用 `SDK/bin` 里的 Clang、Clang++。插件与加载它的 Clang 需二进制兼容。 |
+| `KERNEL_CC`、`HOSTCC`、`HOSTCXX`、`SYSROOT` | 可指定内核 Clang、Kbuild 宿主工具的编译器和自选 glibc 的完整宿主系统根。内核与模块本身不链接 glibc。 |
+| `WORK`、`BOARD`、`BOARD_DIR` | 工作目录默认 `build/board`；示例选用 `build/board-01`。`BOARD` 是板上账户和地址，`BOARD_DIR` 是板上家目录下的本轮目录，两者用于 `scp`。 |
 
-## 选择基线
+板上不需要 LLVM、Python、just、项目源码或配置处理器。x86_64 QEMU 的模拟环境另按 [QEMU 验证器](../qemu/README.md)准备。
 
-在目标板上从已验证可启动的完整 `.config` 开始。保留启动存储、控制台、设备树、固件、签名、恢复和安全策略所需的功能。采集配置要求 `CONFIG_MODULES=y`、`CONFIG_TRACEPOINTS=y` 和 `CONFIG_TRIM_UNUSED_KSYMS=n`。强制签名时，用内核信任的密钥签署采集驱动。
+## 基线和裁剪策略
 
-参考流程先用 `allnoconfig` 和两个片段建立精简配置，再把该配置作为约束运行 `allyesconfig`，只解除内核配置读取和 CP850 代码页的约束：
+`BOARD_CONFIG` 可指向 Kconfig 格式的小片段，例如包含板厂模块签名密钥路径的 `CONFIG_MODULE_SIG_KEY="/keys/board.pem"`。它在原生 `allyesconfig` **之后**应用。采集要求 `CONFIG_MODULES=y`、`CONFIG_TRACEPOINTS=y`、`CONFIG_TRIM_UNUSED_KSYMS=n`；脚本保留已满足的值。板型相关的改动以实际启动和构建需要为准。
 
-```sh
-tools/kernel.py configure --llvm "$SDK" --base allnoconfig \
-  --fragment qemu/guest.config --fragment examples/profile.config --out build/board-pins
-tools/kernel.py configure --llvm "$SDK" --base allyesconfig \
-  --fragment build/board-pins/.config --unpin CONFIG_IKCONFIG \
-  --unpin CONFIG_NLS_CODEPAGE_850 --out build/board-baseline
+### 登记组件
+
+在变量文件中用空格分隔配置名。以下是写法示例，是否授权应按本板用途决定：
+
+```bash
+export DEFER='CONFIG_IKCONFIG'
+export DROP='CONFIG_NLS_CODEPAGE_850'
 ```
 
-原生 `allyesconfig` 则直接调用上游目标，不传板级片段：
+`build profile` 从 Kbuild 直接规则查找这些配置的 C 文件，自动编号并生成清单。`DROP` 允许在覆盖充分、启动和负载都未命中时关闭；`DEFER` 允许在覆盖充分、启动未命中且模块名明确时延迟加载。启动必需的功能保持内建。两个变量都为空时，工具观察能直接识别的条目，全部保留。
 
-```sh
-export LD_LIBRARY_PATH="$SDK/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-env -u KCONFIG_ALLCONFIG -u KCONFIG_CONFIG make -C .deps/linux \
-  O="$PWD/build/native-allyes" ARCH=x86_64 LLVM="$SDK/bin/" allyesconfig
+复杂聚合对象可用 `SCOPE` 指定已审定的清单，代替上述自动映射。格式见[清单示例](../examples/qemu.scope.tsv)：编号（从 1 开始）、配置名、模块名或 `-`、策略、相对 C 源文件路径，以制表符分隔。相同配置的各成员使用同一策略。配置保持原值的具体原因见 `plan/report.tsv`。
+
+## 启动文件
+
+- `GRUB_KERNEL` 和 `GRUB_INITRD` 是板上现有默认启动项的固定文件路径，在主机打包时填写。若默认项引用的是版本化路径，三轮都写最初的那一对；不要每次重启后重新按 `uname -r` 取值。安装保留菜单、根盘参数和控制台设置。依赖同一路径的其他菜单项也会读到新文件。
+- 默认构建 `Image modules dtbs`。包内 `boot/Image` 是所选镜像，`lib/modules/<release>/` 是匹配的运行模块，`dtbs/` 是本次配置选中的设备树。三版采用不同的内核发行后缀。采集版额外带 `kcfg_collect`，候选版带填写好的 `modules-load.late`。
+- 安装时设备树放在 `/boot/dtbs/<release>/`。固件提供设备树时不必设置变量。默认项显式加载外置设备树时，`DTB` 填其在包内 `dtbs/` 下的相对路径，`GRUB_DTB` 填板上默认项引用的绝对路径。已有的其他覆盖文件仍按原菜单加载。
+- 默认项需要 EFI 自解压内核时，设 `IMAGE_TARGET=vmlinuz.efi` 并在基线启用 `CONFIG_EFI_ZBOOT`；普通未压缩 EFI stub 使用默认 `Image`。板要求 EFI 签名时，安装主机工具 `sbsigntool`，同时设置 `EFI_KEY` 和板已信任的 `EFI_CERT`。模块签名使用本次内核配置和对应密钥。
+
+## 采集、回放和比较
+
+进入板上的本轮目录，执行 `./profile/run 负载 参数…`。它在系统就绪后打开整机采集窗口，以调用者身份运行负载，成功后冻结并写入 `profile/trace.tsv`。每次启动只有一个窗口。要合并场景，先将 `trace.tsv` 改名保存，再重启同一采集内核运行另一个负载。将两份快照传回主机后执行：
+
+```bash
+./kcfg plan first.tsv --also second.tsv --review
 ```
 
-探索宽基线时，可从原生配置逐项记录为构建、启动或采集所需的调整；也可用 `qemu/guest.config` 与 `examples/broad.config` 起草宽约束。两个方案都应先通过目标启动回放，再作为体积和启动时间的比较基线。配置、构建和回放各使用新输出目录。
+默认批处理；加 `--review` 可用方向键和空格调整建议，按 `s` 保存，按 `q` 取消。`plan/requested.config` 是请求，`candidate/.config` 是经 Kconfig 和实际构建确认的结果。
 
-## 登记组件
+`./baseline/run` 和 `./candidate/run` 都接受同一条负载命令。候选版在就绪后用 `modprobe` 加载清单内的模块及依赖；已在就绪前加载的模块会被报告。成功回放后 `boot.tsv` 记录角色、内核发行版本、本次启动标识和就绪时间戳（微秒）。
 
-```sh
-tools/kernel.py inventory --under fs/nls --symbol CONFIG_NLS_CODEPAGE_850 \
-  --out build/discovered.tsv
-```
-
-以 [`examples/qemu.scope.tsv`](../examples/qemu.scope.tsv) 为模板。五列依次为连续编号、配置名、模块名或 `-`、策略、相对源码路径，使用制表符分隔。同一选项的多个文件使用一致的模块名和策略。`inventory` 根据直接 Kbuild 规则起草清单，默认标记 `keep`。核对编译对象、注册副作用和回退路径后，再将可关闭的项标记 `drop`，将允许后加载的项标记 `defer`。
-
-## 构建与采集
-
-```sh
-SDK="$SDK" just host
-tools/kernel.py profile --llvm "$SDK" --baseline build/board-baseline/.config \
-  --scope examples/qemu.scope.tsv --plugin build/host/plugin/kcfg_frontend.so \
-  --out build/board-profile
-qemu/guest.py run --mode profile \
-  --kernel build/board-profile/kernel/arch/x86/boot/bzImage \
-  --module build/board-profile/driver/kcfg_collect.ko \
-  --workload examples/workload.sh --output build/board-capture
-```
-
-实板从独立试验槽启动，各构建步骤使用相同的 `--arch`；镜像步骤可指定 `--image-target`，例如 `--arch arm64 --image-target Image`。在 x86_64 上交叉构建、用 Ubuntu 与 GRUB 上板并比较运行包和启动时间，见 [RISC-V 64 实板验证](riscv64-board.md)。
-
-在目标系统上以管理员身份加载与内核匹配的驱动。预热完成后启动采集，等待负载和要纳入观测的后台任务完成，再冻结快照：
-
-```sh
-set -eu
-insmod /path/to/kcfg_collect.ko
-printf 'start\n' > /dev/kconfig-trace
-/path/to/workload-and-wait
-printf 'stop\n' > /dev/kconfig-trace
-cat /dev/kconfig-trace > trace.tsv
-```
-
-只导出成功负载的快照，并保留该构建的完整 `campaign` 目录。每次启动提供一个整机观测窗口；覆盖业务、恢复、热插拔等场景时，分别启动同一采集镜像，再把成功快照合并。
-
-## 审阅、回放与部署
-
-```sh
-build/host/processor/kcfg-plan build/board-profile/campaign \
-  build/board-capture/trace.tsv build/board-plan --review
-tools/kernel.py candidate --llvm "$SDK" --campaign build/board-profile/campaign \
-  --plan build/board-plan --out build/board-candidate
-```
-
-方向键选择建议，空格撤回或恢复，`s` 保存，`q` 取消。省略 `--review` 可批处理，`--also` 可合并同一构建的快照。通过 `report.tsv` 核对决定；若 Kconfig 改写请求或牵动其他选项，复核依赖和策略后重新生成方案。
-
-用候选内核运行原负载。QEMU 的 `--late-module` 参数按 `deferred-paths.txt` 的顺序传入，路径相对于候选目录。参考方案只延迟一个模块：
-
-```sh
-qemu/guest.py run --mode candidate \
-  --kernel build/board-candidate/kernel/arch/x86/boot/bzImage \
-  --late-module build/board-candidate/kernel/kernel/configs.ko \
-  --workload examples/workload.sh --output build/board-replay
-```
-
-部署时，将候选内核、匹配的模块和固件装入试验槽，运行 `depmod`。在明确的业务启动事件加载 `modules-load.late`，例如交给服务的 `ExecStartPre` 脚本：
-
-```sh
-set -eu
-while IFS= read -r module; do
-  modprobe -- "$module"
-done < /path/to/reviewed/modules-load.late
-```
-
-在就绪点和负载前后检查 `/proc/modules`，核对启动镜像、`udev` 别名、其他服务和模块依赖是否提前触发加载。无法保证计划加载时刻时，撤回该项建议。冷启动、业务、异常恢复和回滚通过后，再切换默认启动槽。
-
-## 排障
-
-| 现象 | 检查 |
-|---|---|
-| 插件加载失败或版本不符 | 确认同一 LLVM 前缀的 `bin` 和 `lib` 同时生效。 |
-| 选项保持原值 | 看 `report.tsv` 的理由，以 `coverage.tsv` 和 `objects.tsv` 核对覆盖和归属。 |
-| 模块加载失败 | 核对内核发行版本、硬依赖和签名。 |
-| 采集命令失败 | 核对目标权限、采集状态和初始化钩子；新开一轮时重新启动。 |
-| 客体未完成 | 用 `guest.status` 定位失败阶段，再检查 `console.log`。 |
+`compare` 用实际传输的两个 `.tar.gz` 的字节数，以及各版从内核启动到 `multi-user.target` 激活的时间中位数（秒）。就绪时间不含固件、GRUB、用户登录和工作负载。缩减率为 `100 ×（基线 − 候选）／基线`。两版各一次成功启动即可比较；重复采样时固定业务输入、服务和外设，得到的样本数会随结果显示。

@@ -1,30 +1,30 @@
-# 面向板卡负载的 Linux 内核裁剪
+# 按板和负载裁剪 Linux 内核
 
-用目标板和真实负载的执行记录生成完整 `.config` 与延迟加载清单。工具区分启动、负载和初始化活动，按板级策略提出裁剪建议，再用新内核回放同一负载。
+在 x86_64 主机上交叉编译，在 riscv64 板上运行真实负载。工具区分启动、负载和初始化命中，生成完整 `.config`，再比较基线和候选内核的运行包大小与启动时间。
 
-## 快速上手
+## 从这里开始
 
-参考环境：x86_64 QEMU、Ubuntu Base 24.04.4、Linux 7.4-rc3、LLVM／Clang／LLD 23.1.4、FTXUI 6.1.9。可通过 `LINUX` 和 `SDK` 选择板厂源码和其他兼容工具链。构建与模拟使用宿主机普通账户；客体初始进程负责挂载和加载模块。见[工具链准备](docs/usage.md#准备工具链)。
+[实板操作流程](docs/riscv64-board.md)按执行顺序列出主机和 Ubuntu 板端的命令：安装依赖、换核、采集、裁剪、回放、比较。主机从这几行开始：
 
-```sh
-just sources
-just check
-JOBS=8 just demo build/my-first-run
+```bash
+cp examples/board.env board.env
+${EDITOR:-vi} board.env
+source ./board.env
+./kcfg tools && ./kcfg config
 ```
 
-`just demo` 使用精简的板级基线，依次验证基线、采集版和候选内核。示例负载在候选内核就绪后读取 `/proc/config.gz`：先加载配置读取模块时通过，省略模块时失败。每次运行使用新输出目录。
+`tools` 自动获取缺少的源码并编译工具，也可复用已有依赖。`config` 从原生 `allyesconfig` 建立基线。基线、采集版和候选版各自打成一个 `.tar.gz`，传到板上后由用户在本机安装并重启。
 
-| 产物（相对于输出目录） | 用途 |
+| 关心的结果 | 主机上的位置 |
 |---|---|
-| `capture/trace.tsv` | 查看启动、负载和初始化命中。 |
-| `plan/report.tsv` | 查看配置项保留或变更的依据。 |
-| `candidate/.config` | 使用已通过依赖检查和构建的完整配置。 |
-| `candidate/deferred-paths.txt` | 按顺序加载候选模块和硬依赖。 |
-| `result.json` | 核对回放结果与压缩镜像大小。 |
+| 原生配置与必要调整 | `$WORK/config/native.config`、`$WORK/config/changes.tsv` |
+| 负载快照与裁剪理由 | `$WORK/trace.tsv`、`$WORK/plan/report.tsv` |
+| 最终配置与可安装的内核包 | `$WORK/candidate/.config`、`$WORK/packages/candidate.tar.gz` |
+| 包体积和启动时间差异 | `./kcfg compare` |
 
-## 文档
+## 参考
 
-- [使用指南](docs/usage.md)：搭建工具链，选择基线，采集、审阅与部署。
-- [架构](docs/architecture.md)：插桩、运行窗口、裁剪规则与构建校验。
-- [验收记录](docs/validation.md)：裁剪结果、反向对照与复现命令。
-- [Clang 插件](plugin/README.md)、[配置处理器](processor/README.md)、[QEMU 验证器](qemu/README.md)：组件接口与独立运行方式。
+- [脚本使用说明](docs/usage.md)：命令、变量、包内容、策略和指标。
+- [架构](docs/architecture.md)：插桩、采集窗口和配置决策。
+- [参考平台验收](docs/validation.md)：x86_64 QEMU 的四次启动结果及复现命令。
+- [Clang 插件](plugin/README.md)、[配置处理器](processor/README.md)、[QEMU 验证器](qemu/README.md)：组件独立使用说明。

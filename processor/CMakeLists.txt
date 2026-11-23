@@ -10,7 +10,7 @@ endif()
 
 set(FTXUI_SOURCE_DIR "" CACHE PATH "Local FTXUI checkout (otherwise use installed package)")
 if(NOT TARGET ftxui::component)
-  if(NOT FTXUI_SOURCE_DIR AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../.deps/ftxui/CMakeLists.txt")
+  if(NOT FTXUI_SOURCE_DIR AND NOT ftxui_DIR AND EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/../.deps/ftxui/CMakeLists.txt")
     set(FTXUI_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/../.deps/ftxui")
   endif()
   if(FTXUI_SOURCE_DIR)

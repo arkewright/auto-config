@@ -1,0 +1,94 @@
+#!/bin/bash
+set -euo pipefail
+
+note() { printf 'run: %s\n' "$*" >&2; }
+fail() { note "$*"; exit 1; }
+[[ $# -gt 0 ]] || fail 'usage: run WORKLOAD [ARGS...]'
+bundle=$(dirname -- "${BASH_SOURCE[0]}")
+kind=$(<"$bundle/kind")
+case $kind in
+    profile)
+        output=$bundle/trace.tsv
+        [[ ! -e $output ]] || fail "snapshot already saved: $output (move it before the next capture)" ;;
+    baseline|candidate) output=$bundle/boot.tsv ;;
+    *) fail "unknown bundle role: $kind" ;;
+esac
+release=$(<"$bundle/release")
+running=$(uname -r)
+[[ $running == "$release" ]] || fail "kernel release mismatch: running $running, bundle expects $release"
+
+# Offline tests redirect only the procfs and sysfs lookups.
+system_root=${KCFG_RUN_SYSTEM_ROOT:-}
+if [[ $kind != profile ]]; then
+    boot_id=$(<"$system_root/proc/sys/kernel/random/boot_id")
+    samples=
+    if [[ -f $output ]]; then
+        samples=$(<"$output")
+        [[ $samples != *$'\t'"$boot_id"$'\t'* ]] || fail 'boot already recorded in boot.tsv'
+    fi
+fi
+
+readiness=$(systemctl show -p ActiveState -p ActiveEnterTimestampMonotonic multi-user.target) ||
+    fail 'could not query multi-user.target'
+active= ready_us=
+while IFS='=' read -r property value; do
+    case $property in
+        ActiveState) active=$value ;;
+        ActiveEnterTimestampMonotonic) ready_us=$value ;;
+    esac
+done <<< "$readiness"
+[[ $active == active ]] || fail 'multi-user.target is not active'
+[[ $ready_us =~ ^[1-9][0-9]*$ ]] || fail 'invalid multi-user.target monotonic activation timestamp'
+
+run_workload() {
+    "$@" || { status=$?; note "workload failed (exit $status)"; exit "$status"; }
+}
+stage_result() {
+    pending=$(mktemp -- "$bundle/.result.XXXXXXXX")
+    trap 'rm -f -- "$pending"' EXIT
+}
+recorder() { sudo dd of=/dev/kconfig-trace conv=nocreat,notrunc status=none <<< "$1"; }
+stop_recording() { recorder stop || { note 'could not stop capture'; return 1; }; }
+
+capture_profile() {
+    sudo modprobe -- kcfg_collect || fail 'could not load kcfg_collect'
+    recorder start || fail 'could not start capture (only one capture per boot)'
+    trap 'stop_recording || :' EXIT
+    trap 'exit 129' HUP
+    trap 'exit 130' INT
+    trap 'exit 143' TERM
+    run_workload "$@"
+    trap - EXIT
+    stop_recording
+    stage_result
+    sudo cat -- /dev/kconfig-trace > "$pending" || fail 'could not read frozen capture'
+    [[ -s $pending ]] || fail 'frozen capture is empty'
+}
+
+load_late_modules() {
+    mapfile -t modules < "$bundle/modules-load.late"
+    for module in "${modules[@]}"; do
+        name=${module//-/_}
+        [[ $name != kcfg_collect ]] || fail 'collector is profile-only'
+        [[ ! -e $system_root/sys/module/$name ]] || fail "late module already loaded: $module"
+    done
+    for module in "${modules[@]}"; do
+        sudo modprobe -- "$module" || fail "could not load late module: $module"
+        [[ -d $system_root/sys/module/${module//-/_} ]] || fail "late module did not load: $module"
+    done
+}
+
+if [[ $kind == profile ]]; then
+    capture_profile "$@"
+else
+    if [[ $kind == candidate ]]; then load_late_modules; fi
+    run_workload "$@"
+    stage_result
+    {
+        if [[ -n $samples ]]; then printf '%s\n' "$samples"; fi
+        printf '%s\t%s\t%s\t%s\n' "$kind" "$release" "$boot_id" "$ready_us"
+    } > "$pending"
+fi
+mv -fT -- "$pending" "$output"
+trap - EXIT
+printf 'run: saved %s\n' "$output"

@@ -2,5 +2,6 @@
 /build/
 /out/
 /CMakeUserPresets.json
+/board.env
 __pycache__/
 .ruff_cache/

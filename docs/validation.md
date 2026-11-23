@@ -61,4 +61,8 @@ qemu/guest.py run --mode profile --kernel build/versions-profile/kernel/arch/x86
 
 ## 适用范围
 
-以上结果使用精简的参考板级基线；示例中带约束的 `allyesconfig` 生成了相同的 `.config`。另一次实验从原生 `allyesconfig` 出发，调整后的宽基线已构建，客体启动尚未通过。Ubuntu 与 GRUB 开发板的实测步骤见 [RISC-V 64 实板验证](riscv64-board.md)。
+以上 QEMU 结果使用精简的参考板级基线；示例中带约束的 `allyesconfig` 生成了相同的 `.config`。另一次实验从原生 `allyesconfig` 出发，调整后的宽基线已构建，客体启动尚未通过。
+
+## RISC-V 脚本验证
+
+在 x86_64 上用 `./kcfg config` 生成了 riscv64 原生全选配置和采集所需的差异。另用精简配置交叉构建并打包了三版内核：实际归档中的 `Image` 和设备树与构建产物一致，采集包包含匹配的签名驱动。用模拟快照生成的候选包包含延迟模块 `configs.ko`。板端安装脚本在隔离文件系统中测试；实板换核、负载和启动计时按[实板操作流程](riscv64-board.md)执行。
