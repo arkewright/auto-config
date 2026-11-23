@@ -59,4 +59,4 @@ qemu/guest.py run --mode profile --kernel build/versions-profile/kernel/arch/x86
 
 ## 适用范围
 
-以上结果使用精简的参考板级基线；示例中带约束的 `allyesconfig` 生成了相同的 `.config`。另一次实验从原生 `allyesconfig` 出发，调整后的宽基线已构建，客体启动尚未通过。实板部署按[使用指南](usage.md#审阅回放与部署)验收。
+以上结果使用精简的参考板级基线；示例中带约束的 `allyesconfig` 生成了相同的 `.config`。另一次实验从原生 `allyesconfig` 出发，调整后的宽基线已构建，客体启动尚未通过。Ubuntu 与 GRUB 开发板的实测步骤见 [RISC-V 64 实板验证](riscv64-board.md)。

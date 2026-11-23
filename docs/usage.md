@@ -75,7 +75,7 @@ qemu/guest.py run --mode profile \
   --workload examples/workload.sh --output build/board-capture
 ```
 
-实板沿用自身的引导流程，从独立试验槽启动采集版。各构建步骤使用相同的 `--arch`；镜像步骤可指定 `--image-target`，例如 `--arch arm64 --image-target Image`。
+实板从独立试验槽启动，各构建步骤使用相同的 `--arch`；镜像步骤可指定 `--image-target`，例如 `--arch arm64 --image-target Image`。在 x86_64 上交叉构建、用 Ubuntu 与 GRUB 上板并比较运行包和启动时间，见 [RISC-V 64 实板验证](riscv64-board.md)。
 
 在目标系统上以管理员身份加载与内核匹配的驱动。预热完成后启动采集，等待负载和要纳入观测的后台任务完成，再冻结快照：
 
