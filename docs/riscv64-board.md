@@ -24,7 +24,7 @@ sudo cat /boot/grub/grub.cfg
 
 - 记录板型和硬件修订、固件版本、根盘标识、文件系统、串口、设备树来源及安全启动状态。保存原配置 `/boot/config-$(uname -r)`、原菜单项、镜像、initrd 和模块；用串口或本地控制台实际选一次原条目，确认能够恢复。用测试盘或可还原的系统副本运行全选内核，尤其先审查上电自检和可能写存储的驱动测试。
 - 核对原菜单中加载内核、initrd 和外置设备树的命令及路径。本文打包 **GRUB 能直接加载的 RISC-V EFI 镜像**：未压缩的 EFI stub `Image`，或 EFI 自解压的 `vmlinuz.efi`。`/boot/vmlinuz-*` 只是文件名；普通 `Image.gz` 和 EFI 自解压镜像格式不同。固件已提供设备树或 ACPI 时沿用它；原条目显式加载设备树时，三版使用同一块板的 DTB 和覆盖文件。
-- 用原内核先跑通真实业务。准备 `/opt/board-test/run-and-check`：以业务账户使用固定输入，等待全部工作结束，校验业务结果，成功才返回零。下文使用这个现场入口。每轮从同一份测试数据副本开始，固定服务、固件和外设。若板依赖固定上游源码没有的厂商驱动或只能启动厂商容器格式，先解决板级支持和受信封装，再开始比较。
+- 用原内核先跑通真实业务。准备 `/opt/board-test/run-and-check`：以业务账户使用固定输入，等待全部工作结束，校验业务结果，成功才返回零。下文使用这个现场入口。每轮从同一份测试数据副本开始，固定服务、固件和外设。若板依赖厂商驱动，三版都用包含该驱动的板厂源码。若板只能启动厂商容器格式，按板方流程封装三版镜像。
 
 x86_64 构建和打包不需要 root。板上安装、生成 initrd、加载模块、访问采集设备和重启需要管理员权限。使用板上既有的签名制度，私钥留在签名端。
 
@@ -36,22 +36,26 @@ x86_64 构建和打包不需要 root。板上安装、生成 initrd、加载模�
 set -euo pipefail
 export LC_ALL=C
 ROOT=$(pwd -P); RUN=rvboard01; BOARD=lab@board.example
-export LINUX="$ROOT/.deps/linux" SDK="$ROOT/.deps/llvm-riscv" JOBS=8
+export SDK="${SDK:-$ROOT/.deps/llvm-riscv}" JOBS="${JOBS:-8}"
 W="$ROOT/build/$RUN"; HOST="$W/host"
 mkdir -p "$ROOT/build"; mkdir "$W"
 unset ARCH CROSS_COMPILE LLVM_IAS CC CXX SYSROOT CMAKE_TOOLCHAIN_FILE LOCALVERSION
 unset KCONFIG_CONFIG KCONFIG_ALLCONFIG KBUILD_OUTPUT KBUILD_EXTMOD KBUILD_EXTMOD_OUTPUT MAKEFLAGS MFLAGS
 
-tools/sources.py --llvm-source
+if [[ -x $SDK/bin/llvm-config ]]; then
+    tools/sources.py
+else
+    tools/sources.py --llvm-source
+    cmake -S .deps/llvm-project/llvm -B "$W/llvm-build" -G Ninja \
+      -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$SDK" \
+      -DLLVM_ENABLE_PROJECTS='clang;lld' -DLLVM_TARGETS_TO_BUILD='X86;RISCV;BPF' \
+      -DLLVM_BUILD_LLVM_DYLIB=ON -DLLVM_LINK_LLVM_DYLIB=ON -DCLANG_LINK_CLANG_DYLIB=ON
+    cmake --build "$W/llvm-build" --target install --parallel "$JOBS"
+fi
+SDK=$(realpath -e "$SDK"); LINUX=$(realpath -e "${LINUX:-$ROOT/.deps/linux}"); export LINUX
 export KBUILD_BUILD_USER=boardlab KBUILD_BUILD_HOST=builder KBUILD_BUILD_VERSION=1
-export KBUILD_BUILD_TIMESTAMP="$(git -C "$LINUX" show -s --format=%cD HEAD)"
-export SOURCE_DATE_EPOCH="$(git -C "$LINUX" show -s --format=%ct HEAD)"
-cmake -S .deps/llvm-project/llvm -B "$W/llvm-build" -G Ninja \
-  -DCMAKE_BUILD_TYPE=Release -DCMAKE_INSTALL_PREFIX="$SDK" \
-  -DLLVM_ENABLE_PROJECTS='clang;lld' -DLLVM_TARGETS_TO_BUILD='X86;RISCV;BPF' \
-  -DLLVM_BUILD_LLVM_DYLIB=ON -DLLVM_LINK_LLVM_DYLIB=ON -DCLANG_LINK_CLANG_DYLIB=ON
-cmake --build "$W/llvm-build" --target install --parallel "$JOBS"
-SDK=$(realpath -e "$SDK"); LINUX=$(realpath -e "$LINUX")
+export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(stat -c %Y "$LINUX/Makefile")}
+export KBUILD_BUILD_TIMESTAMP="$(date -u -R -d "@$SOURCE_DATE_EPOCH")"
 export PATH="$SDK/bin:$PATH" LD_LIBRARY_PATH="$SDK/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 "$SDK/bin/clang" --version; "$SDK/bin/llvm-config" --targets-built
 CC="$SDK/bin/clang" CXX="$SDK/bin/clang++" HOST_BUILD="$HOST" just check
@@ -59,7 +63,9 @@ file "$HOST/plugin/kcfg_frontend.so" "$HOST/processor/kcfg-plan"
 ssh "$BOARD" "umask 077; mkdir -- '$RUN'"
 ```
 
-应看到 Clang 23.1.4、`RISCV` 后端，以及两个 x86-64 主机产物。插件由主机 Clang 加载，处理器也只在主机运行。内核和 `.ko` 才是 RISC-V 产物：源码固定为 Linux 7.4-rc3，Kbuild 参数是 `ARCH=riscv`，位宽由 `.config` 决定。全 LLVM 与集成汇编器无需目标 glibc 或 GNU 交叉前缀。
+首次下载默认取 Linux 7.4-rc3 和 LLVM 23.1.4；用 `LINUX_REF`、`LLVM_REF` 选择其他标签或分支。已有板厂源码可通过 `LINUX` 指定，已有兼容工具链可通过 `SDK` 指定。确认工具链列出 `RISCV` 后端，插件和处理器均为 x86-64；加载插件的 Clang 来自构建插件的同一套工具链。
+
+内核和 `.ko` 使用 Kbuild 的 `ARCH=riscv`，位宽由 `.config` 决定。全 LLVM 与集成汇编器无需目标 glibc 或 GNU 交叉前缀。
 
 ## 三、建立原生基线
 
@@ -69,7 +75,6 @@ ssh "$BOARD" "umask 077; mkdir -- '$RUN'"
 mkdir "$W/native" "$W/config"
 env -u KCONFIG_ALLCONFIG -u KCONFIG_CONFIG make -C "$LINUX" O="$W/native" \
   ARCH=riscv LLVM="$SDK/bin/" allyesconfig
-sha256sum "$W/native/.config" > "$W/native.sha256"
 cp "$W/native/.config" "$W/config/.config"
 "$LINUX/scripts/config" --file "$W/config/.config" --disable TRIM_UNUSED_KSYMS
 if [[ -n ${MODULE_SIGN_KEY:-} ]]; then
@@ -90,38 +95,25 @@ done
 
 ## 四、打包与试启动：先完成基线
 
-在主机上构建基线。`LOCALVERSION` 区分模块目录，不改变配置。`plain` 本身就是 Kbuild 输出目录，其他两版的目录在其 `kernel/` 子目录。
+按原 GRUB 条目选定 `FORMAT`，三版都直接构建这一镜像。下例使用未压缩的 EFI stub；需要 EFI 自解压时改为 `vmlinuz.efi`，并在基线配置中启用 `CONFIG_EFI_ZBOOT`。`LOCALVERSION` 用于区分三版的模块目录。
 
 ```bash
-K=(--linux "$LINUX" --llvm "$SDK" --arch riscv --jobs "$JOBS" --image-target Image)
+FORMAT=Image
+if [[ $FORMAT == vmlinuz.efi ]]; then rg -qx 'CONFIG_EFI_ZBOOT=y' "$W/config/.config"; fi
+K=(--linux "$LINUX" --llvm "$SDK" --arch riscv --jobs "$JOBS" --image-target "$FORMAT")
 LOCALVERSION="-$RUN-base" tools/kernel.py plain "${K[@]}" \
   --baseline "$W/config/.config" --out "$W/plain"
 "$SDK/bin/llvm-readelf" -h "$W/plain/vmlinux"
 ```
 
-读到的 ELF 应为 `ELF64`、`RISC-V`。下面定义一次打包和传输函数，基线、采集版、候选都调用它。按第一节的核对结果设置 `FORMAT` 为 `Image` 或 `vmlinuz.efi`，设置 `EFI_POLICY` 为 `signed` 或 `unsigned`。前者需设置 `EFI_KEY`、`EFI_CERT` 并使用板已信任的证书；采用外部签名服务时，将函数中的签名两行替换为该服务的签发和验签步骤。只有试验板原策略允许未签镜像时才设 `unsigned`。
+确认 ELF 为 `ELF64`、`RISC-V`。按板上既有策略设置 `EFI_POLICY`：要求签名时用 `signed`，设置 `EFI_KEY` 和板已信任的 `EFI_CERT`；使用外部签名服务时，替换函数中的签发和验签步骤。板上允许未签镜像时可用 `unsigned`。
 
 如需随包交付外置设备树，可运行 `make -C "$LINUX" O="$W/config" ARCH=riscv LLVM="$SDK/bin/" dtbs`，或取板方已经验证的文件。令 `BOARD_BOOT_FILES` 指向只含所选 DTB 和覆盖文件的新目录并 `export`；使用固件所供描述时不设置它。
 
 ```bash
-# 示例：已确认加载未压缩 EFI stub，且板要求签名。
-FORMAT=Image; EFI_POLICY=signed
-# EFI_KEY 和 EFI_CERT 由签名端提供。
+EFI_POLICY=signed
 pack_send() {
-    local kind=$1 suffix=$4 obj cc image idfile
-    obj=$(realpath -e "$2"); cc="$(realpath -e "$(dirname "$3")")/${3##*/}"
-    image="$obj/arch/riscv/boot/Image"
-    if [[ $FORMAT == vmlinuz.efi ]]; then
-        rg -qx 'CONFIG_EFI_ZBOOT=y' "$obj/.config"
-        idfile="$W/$kind-before-zboot.sha256"
-        (cd "$obj" && sha256sum vmlinux arch/riscv/boot/Image Module.symvers) > "$idfile"
-        make -s --no-print-directory -C "$LINUX" O="$obj" ARCH=riscv LLVM="$SDK/bin/" \
-          KBUILD_ABS_SRCTREE=1 CC="$cc" LOCALVERSION="$suffix" -j"$JOBS" vmlinuz.efi
-        (cd "$obj" && sha256sum -c "$idfile")
-        image="$obj/arch/riscv/boot/vmlinuz.efi"
-    else
-        [[ $FORMAT == Image ]]
-    fi
+    local kind=$1 image="$2/arch/riscv/boot/$FORMAT"
     case "$EFI_POLICY" in
         signed) sbsign --key "${EFI_KEY:?}" --cert "${EFI_CERT:?}" --output "$W/$kind.signed.efi" "$image"
                 sbverify --cert "$EFI_CERT" "$W/$kind.signed.efi"; image="$W/$kind.signed.efi" ;;
@@ -131,10 +123,8 @@ pack_send() {
     bash docs/riscv64/package.sh "$W" "$SDK" "$kind" "$image"
     scp -r "$W/packages/$kind" "$BOARD:$RUN/"
 }
-pack_send baseline "$W/plain" "$SDK/bin/clang" "-$RUN-base"
+pack_send baseline "$W/plain"
 ```
-
-构建工具接受 `--image-target Image`。若板需要 `vmlinuz.efi`，上面的函数用原编译器和发行后缀调用 Kbuild 单独封装，核对载荷未变。采集内核或原始驱动与 `campaign/build.json` 中的摘要不符时，停止发包；重新构建的采集版须重新采集。
 
 [打包示例](riscv64/package.sh)把实际启动的镜像、配置、`System.map`、该发行版本的全部运行模块及其索引、延迟清单和指定的设备树装入一个 `riscv64` 的 `.deb`。三版用同一剥离、签名及压缩流程。它在临时根运行 `modules_install`；采集版另安装树外模块并核对其版本和签名。EFI 映像签名与内核模块签名是两套信任关系；启用强制模块签名时，这份示例要求 `CONFIG_MODULE_SIG_ALL=y` 并可访问各构建所配置的模块签名密钥。
 
@@ -143,10 +133,12 @@ pack_send baseline "$W/plain" "$SDK/bin/clang" "-$RUN-base"
 ```bash
 set -euo pipefail
 RUN=rvboard01; kind=baseline
-cd "$HOME/$RUN/$kind"; sha256sum -c SHA256SUMS
-rel=$(<release); slot="/boot/board-trial/$rel"
+cd "$HOME/$RUN/$kind"
+rel=$(dpkg-deb -f kernel.deb Kernel-Release)
+[[ -n $rel && $rel == "$(<release)" && $rel != "$(uname -r)" ]]
 [[ $(uname -m) == riscv64 && $(dpkg --print-architecture) == riscv64 ]]
-[[ $(dpkg-deb -f kernel.deb Architecture) == riscv64 && $rel != "$(uname -r)" ]]
+[[ $(dpkg-deb -f kernel.deb Architecture) == riscv64 ]]
+slot="/boot/board-trial/$rel"
 for path in "$slot" "/lib/modules/$rel" "/boot/config-$rel" "/boot/System.map-$rel"; do
     [[ ! -e $path && ! -L $path ]]
 done
@@ -182,12 +174,12 @@ cp "$W/inventory.tsv" "$W/scope.tsv"
 # 编辑 scope.tsv，保留本轮条目，按 1 至 N 重新编号并审定策略，然后构建。
 tools/kernel.py profile "${K[@]}" --baseline "$W/config/.config" \
   --scope "$W/scope.tsv" --plugin "$HOST/plugin/kcfg_frontend.so" --out "$W/profile"
-CAMP="$W/profile/campaign"; id=$(<"$CAMP/campaign.id")
+CAMP="$W/profile/campaign"
 "$SDK/bin/llvm-readelf" -h "$W/profile/driver/kcfg_collect.ko"
-pack_send profile "$W/profile/kernel" "$CAMP/clang" "-kcfg-${id:0:16}"
+pack_send profile "$W/profile/kernel"
 ```
 
-清单是制表符分隔的连续编号、配置名、模块名或 `-`、策略、相对源码路径。起草结果均为 `keep`；确认可缺省的功能才标 `drop`，确认启动后可加载且模块名明确的才标 `defer`。保留启动存储、控制台、安全和恢复所需功能，以及 SSH 回传依赖的管理网络。查看 `coverage.tsv` 和 `objects.tsv`：覆盖不足的配置保持原值。保留整个 `campaign/` 在主机上，改清单或基线后须重新构建、重新采集。详见[登记组件](usage.md#登记组件)。
+清单是制表符分隔的连续编号、配置名、模块名或 `-`、策略、相对源码路径。起草结果均为 `keep`；确认可缺省的功能才标 `drop`，确认启动后可加载且模块名明确的才标 `defer`。保留启动存储、控制台、安全和恢复所需功能，以及 SSH 回传依赖的管理网络。查看 `coverage.tsv` 和 `objects.tsv`：覆盖不足的配置保持原值。保留整个 `campaign/` 在主机上；更换源码、基线或清单后，用新构建重新采集。详见[登记组件](usage.md#登记组件)。
 
 先在原系统或离线快照中复原测试输入，再按第四节以 `kind=profile` 安装并启动，避免把复原数据的操作记为启动需求。完成与基线相同的预热，到约定就绪点后，在板端执行以下命令；负载仍以原业务账户运行，只有设备操作使用 `sudo`。
 
@@ -203,7 +195,7 @@ rc=0; /opt/board-test/run-and-check > workload.log 2>&1 || rc=$?
 sudo sh -c 'printf "stop\n" > /dev/kconfig-trace'
 printf '%s\n' "$rc" > workload.exit; [[ $rc == 0 ]]
 sudo cat /dev/kconfig-trace > trace.tsv.part; test -s trace.tsv.part
-mv trace.tsv.part trace.tsv; sha256sum trace.tsv > SHA256SUMS
+mv trace.tsv.part trace.tsv
 ```
 
 每次启动只有一个整机窗口。`start` 之前的普通活动计入启动，初始化调用链单列。未通过业务校验的轮次保留日志、不发布快照。其他业务或恢复场景用同一采集版重新启动，分别保存到新的目录。
@@ -211,9 +203,6 @@ mv trace.tsv.part trace.tsv; sha256sum trace.tsv > SHA256SUMS
 ```bash
 # 主机，从板拉回原始文件；处理器校验构建身份、每个编号和结束行。
 scp -r "$BOARD:$RUN/capture-01" "$W/"
-(cd "$W/capture-01" && sha256sum -c SHA256SUMS)
-IFS=$'\t' read -r magic ver trace_id < "$W/capture-01/trace.tsv"
-[[ $magic == KCFG-TRACE && $ver == 1 && $trace_id == "$(<"$CAMP/campaign.id")" ]]
 "$HOST/processor/kcfg-plan" "$CAMP" "$W/capture-01/trace.tsv" "$W/plan" --review
 ```
 
@@ -225,7 +214,7 @@ IFS=$'\t' read -r magic ver trace_id < "$W/capture-01/trace.tsv"
 # 主机
 LOCALVERSION="-$RUN-cand" tools/kernel.py candidate "${K[@]}" \
   --campaign "$CAMP" --plan "$W/plan" --out "$W/candidate"
-pack_send candidate "$W/candidate/kernel" "$SDK/bin/clang" "-$RUN-cand"
+pack_send candidate "$W/candidate/kernel"
 ```
 
 最终配置是 `candidate/.config`。`candidate/deferred-paths.txt` 给出构建树里的模块和硬依赖顺序，包里的 `modules-load.late` 给出部署用模块名。若 `olddefconfig` 引入未授权变化，先复核计划；不要手改已发布的配置或沿用旧快照冒充新采集。
@@ -244,11 +233,11 @@ done < "$late"
 /opt/board-test/run-and-check
 ```
 
-对照两版的退出码和业务结果，例如事务数、校验和、持久化结果。若模块在就绪前已加载，检查 initrd、udev 和服务依赖；调整加载时机或撤回延迟建议后再验收。启动通过而业务失败，仍判该候选失败。
+对照两版的退出码和业务结果，例如完成的事务数和落盘记录。若模块在就绪前已加载，检查 initrd、udev 和服务依赖；调整加载时机或撤回延迟建议后再验收。启动通过而业务失败，仍判该候选失败。
 
 ## 七、比较运行包字节数与启动时间
 
-**包大小**取第四节生成且板上验过摘要的单个 `kernel.deb` 的字节数。统计整套运行模块，包括从内建改成模块的功能；排除开发头文件、调试用 `vmlinux` 和仅在采集版使用的驱动。initrd 在板上生成，不在 `.deb` 内；若还关心启动分区空间，另记每版 `stat -c %s /boot/board-trial/发行版本/initrd`，不要把这两个口径混为一个百分比。
+**包大小**取第四节实际安装到板上的 `kernel.deb` 的字节数。统计整套运行模块，包括从内建改成模块的功能；排除开发头文件、调试用 `vmlinux` 和仅在采集版使用的驱动。initrd 在板上生成，不在 `.deb` 内；若还关心启动分区空间，另记每版 `stat -c %s /boot/board-trial/发行版本/initrd`，不要把这两个口径混为一个百分比。
 
 **启动时间**主指标取内核启动至 `multi-user.target` 首次激活的单调时钟微秒数，含 initrd 和 Ubuntu 用户空间，不含固件和 GRUB。另记内核日志中 `Run /init as init process` 的时间戳，表示内核即将执行 initrd 第一个用户进程。两列分别报告，可区分内核阶段与系统就绪阶段。两版均使用同一 `/init` 和首次就绪目标；不在目标激活前运行测试负载或加载延迟清单。若业务关心首次响应，再单列就绪至首个成功请求的耗时，计入延迟加载的代价。
 
@@ -298,4 +287,4 @@ for i, label in enumerate(('kernel to /init (s)', 'kernel to ready (s)')):
 PY
 ```
 
-裁剪率统一为 `100 ×（基线值 − 候选值）／基线值`；负数表示包变大或启动变慢。归档原生配置、必要调整及理由、三版发行版本和包摘要、快照、计划、最终配置、业务校验与逐次计时。基线和候选都通过实板验收后，才把这组数字作为该板、该负载的结果。
+裁剪率统一为 `100 ×（基线值 − 候选值）／基线值`；负数表示包变大或启动变慢。归档原生配置、必要调整及理由、三版发行版本和安装包、快照、计划、最终配置、业务校验与逐次计时。基线和候选都通过实板验收后，才把这组数字作为该板、该负载的结果。

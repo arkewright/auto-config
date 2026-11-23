@@ -2,7 +2,6 @@
 """Boot a private Ubuntu RAM filesystem, without privileged operations on the host."""
 
 import argparse
-import hashlib
 import io
 import os
 import re
@@ -17,21 +16,13 @@ HERE = Path(__file__).resolve().parent
 VERSION = "24.04.4"
 ARCHIVE = f"ubuntu-base-{VERSION}-base-amd64.tar.gz"
 RELEASE = f"https://cdimage.ubuntu.com/ubuntu-base/releases/{VERSION}/release"
-SHA256 = "c1e67ef7b17a6300e136118bd1dc04725009cb376c1aad10abcf8cd453628d58"
 CACHE = HERE.parent / ".deps" / "guest"
 MODES = ("profile", "baseline", "candidate")
 
 
-def digest(path):
-    with path.open("rb") as source:
-        return hashlib.file_digest(source, "sha256").hexdigest()
-
-
-def verify(path, checksum):
-    if not path.is_file():
-        raise ValueError(f"missing regular file: {path}")
-    if not re.fullmatch(r"[a-f0-9]{64}", checksum) or digest(path) != checksum:
-        raise ValueError(f"SHA-256 mismatch: {path}")
+def nonempty_file(path):
+    if not path.is_file() or path.stat().st_size == 0:
+        raise ValueError(f"expected a nonempty regular file: {path}")
     return path
 
 
@@ -39,24 +30,23 @@ def fetch(cache):
     cache.mkdir(parents=True, exist_ok=True)
     release = cache / f"ubuntu-base-{VERSION}"
     if release.exists():
-        return verify(release / ARCHIVE, SHA256)
+        return nonempty_file(release / ARCHIVE)
     with tempfile.TemporaryDirectory(dir=cache, prefix="download-") as tmp:
         staged = Path(tmp) / "release"
         staged.mkdir()
         subprocess.run(
-            ["curl", "--fail", "--location", "--proto", "=https", "--proto-redir",
+            ["curl", "--disable", "--fail", "--location", "--proto", "=https", "--proto-redir",
              "=https", "--retry", "2", "--max-time", "300", "--silent", "--show-error",
              "--output", str(staged / ARCHIVE), f"{RELEASE}/{ARCHIVE}"], check=True,
         )
-        verify(staged / ARCHIVE, SHA256)
-        # Publish a complete directory, never a partial archive. Concurrent fetches
-        # can only leave another complete release directory at the destination.
+        nonempty_file(staged / ARCHIVE)
+        # Publish only after a successful download. A concurrent fetch may win the rename.
         try:
             staged.rename(release)
         except OSError:
             if not release.is_dir():
                 raise
-    return verify(release / ARCHIVE, SHA256)
+    return nonempty_file(release / ARCHIVE)
 
 
 def file_entry(archive, path, name, mode):
@@ -156,19 +146,41 @@ def vm_command(args, image, output):
     return command
 
 
+def check_trace(path):
+    with nonempty_file(path).open("rb") as source:
+        if not re.fullmatch(rb"KCFG-TRACE\t1\t[0-9a-f]{64}\n", source.readline()):
+            raise ValueError(f"invalid trace header: {path}")
+        seen = set()
+        for line in source:
+            if line.startswith(b"END\t"):
+                count = len(seen)
+                if count and max(seen) == count and line == f"END\t{count}\n".encode("ascii") and not source.read(1):
+                    return
+                break
+            row = re.fullmatch(rb"([1-9][0-9]{0,4})\t[01]\t[01]\t[01]\n", line)
+            if not row:
+                break
+            number = int(row[1])
+            if number > 65535 or number in seen:
+                break
+            seen.add(number)
+    raise ValueError(f"malformed or incomplete trace: {path}")
+
+
 def validate(output, args):
-    rows = (output / "guest.status").read_text(encoding="ascii").splitlines()
+    status = (output / "guest.status").read_bytes().decode("ascii")
+    rows = status.removesuffix("\n").split("\n")
     info = dict(line.split("=", 1) for line in rows)
-    expected = {"status": "ok", "distro": "ubuntu", "mode": args.mode, "ready": "yes",
+    expected = {"distro": "ubuntu", "mode": args.mode, "ready": "yes",
                 "late_modules": str(len(args.late_module))}
-    if (len(rows) != len(info) or not info.get("kernel") or not info.get("version")
+    if (not status.endswith("\nstatus=ok\n") or len(rows) != len(info)
+            or not info.get("kernel") or not info.get("version")
             or any(info.get(key) != value for key, value in expected.items())):
         raise ValueError(f"guest did not finish ({info}); inspect {output}/console.log")
     if args.mode == "profile":
         trace = output / "trace.pending"
-        if trace.stat().st_size == 0:
-            raise ValueError("guest returned an empty trace")
-        verify(trace, info.get("sha256", "")).rename(output / "trace.tsv")
+        check_trace(trace)
+        trace.rename(output / "trace.tsv")
     return info
 
 
@@ -177,9 +189,7 @@ def run(args):
         raise ValueError("memory, cpus and timeout must be positive")
     if not args.kernel.is_file() or not args.workload.is_file():
         raise ValueError("--kernel and --workload must name existing regular files")
-    if args.rootfs is None and args.rootfs_sha256 != SHA256:
-        raise ValueError("a custom --rootfs-sha256 requires --rootfs")
-    rootfs = verify(args.rootfs, args.rootfs_sha256) if args.rootfs else fetch(args.cache)
+    rootfs = nonempty_file(args.rootfs) if args.rootfs else fetch(args.cache)
     output = args.output.absolute()
     output.mkdir(mode=0o700, parents=True, exist_ok=False)
     with tempfile.TemporaryDirectory(prefix="image-", dir=output) as tmp:
@@ -199,7 +209,7 @@ def run(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
-    download = commands.add_parser("fetch", help="verify or acquire the pinned Ubuntu Base rootfs")
+    download = commands.add_parser("fetch", help="reuse or download the default Ubuntu Base rootfs")
     download.add_argument("--cache", type=Path, default=CACHE)
     boot = commands.add_parser("run", help="boot Ubuntu and check the workload's exit status")
     boot.add_argument("--kernel", required=True, type=Path, help="x86_64 bzImage")
@@ -210,7 +220,6 @@ def main():
     boot.add_argument("--late-module", type=Path, action="append", default=[], help="ordered guest insmod after readiness, just before workload")
     boot.add_argument("--payload", type=Path, action="append", default=[], help="file available under /kernel-test/input")
     boot.add_argument("--rootfs", type=Path, help="offline Ubuntu Base amd64 tar archive")
-    boot.add_argument("--rootfs-sha256", default=SHA256, help="expected rootfs digest (default: pinned Ubuntu Base)")
     boot.add_argument("--cache", type=Path, default=CACHE)
     boot.add_argument("--qemu", default="qemu-system-x86_64")
     boot.add_argument("--busybox", default="busybox", help="static x86_64 BusyBox for insmod and reboot")

@@ -92,15 +92,13 @@ private:
 Result<Campaign> readCampaign(fs::path const &directory) {
     auto const id = readFile(directory / "campaign.id", 65);
     if (not id) return std::unexpected{id.error()};
-    auto const seed = readFile(directory / "campaign.seed", 65);
-    if (not seed) return std::unexpected{seed.error()};
     auto const baseline = readFile(directory / "baseline.config", 32 * kMiB);
     if (not baseline) return std::unexpected{baseline.error()};
     auto const scope = readFile(directory / "scope.tsv", 64 * kMiB);
     if (not scope) return std::unexpected{scope.error()};
     auto const coverage = readFile(directory / "coverage.tsv", 4 * kMiB);
     if (not coverage) return std::unexpected{coverage.error()};
-    return parseCampaign({.id = *id, .seed = *seed, .baseline = *baseline, .scope = *scope, .coverage = *coverage});
+    return parseCampaign({.id = *id, .baseline = *baseline, .scope = *scope, .coverage = *coverage});
 }
 
 Result<std::vector<Hits>> readRuns(Campaign const &campaign, std::span<fs::path const> const traces) {

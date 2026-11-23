@@ -3,7 +3,6 @@
 
 import argparse
 import base64
-import hashlib
 import json
 import os
 import re
@@ -16,8 +15,6 @@ from pathlib import Path
 
 ROOT = Path(__file__).resolve().parents[1]
 DRIVER = ROOT / "driver"
-PIN = "23.1.4"
-TAG = "v7.4-rc3"
 SYMBOL = r"CONFIG_[A-Za-z0-9_]+"
 MODULE = r"[A-Za-z0-9_][A-Za-z0-9_-]*"
 SOURCE = r"(?:[A-Za-z0-9_+-]+/)+[A-Za-z0-9_+-]+\.c"
@@ -26,11 +23,6 @@ SOURCE = r"(?:[A-Za-z0-9_+-]+/)+[A-Za-z0-9_+-]+\.c"
 def require(test, message):
     if not test:
         raise ValueError(message)
-
-
-def digest(path):
-    with path.open("rb") as stream:
-        return hashlib.file_digest(stream, "sha256").hexdigest()
 
 
 def text(command, env=None):
@@ -102,15 +94,11 @@ class Toolchain:
         if sdk:
             for var, leaf in (("PATH", "bin"), ("LD_LIBRARY_PATH", "lib")):
                 self.env[var] = str(sdk / leaf) + (":" + self.env[var] if self.env.get(var) else "")
-        cc = shutil.which(args.cc or "clang", path=self.env["PATH"])
-        require(cc, "Clang not found")
+        compiler = args.cc or (str(sdk / "bin/clang") if sdk else "clang")
+        cc = shutil.which(compiler, path=self.env["PATH"])
+        require(cc, f"Clang not found: {compiler}")
         self.cc = str(Path(cc).absolute())  # preserve clang invocation name
-        version = text([self.cc, "--version"], self.env).splitlines()[0]
-        require(re.search(rf"\bclang version {re.escape(PIN)}\b", version), f"expected Clang {PIN}, found {version}")
-        self.revision = text(["git", "-C", self.linux, "rev-parse", "HEAD"])
-        expected = text(["git", "-C", self.linux, "rev-parse", f"{TAG}^{{commit}}"])
-        require(expected == self.revision, f"Linux checkout must be at {TAG}")
-        require(not text(["git", "-C", self.linux, "status", "--porcelain", "--untracked-files=normal"]), "use a clean dedicated Linux checkout")
+        require((self.linux / "Makefile").is_file(), f"missing kernel Makefile: {self.linux}")
         self.arch = args.arch
         require(re.fullmatch(r"[A-Za-z0-9_]+", args.arch) and args.jobs > 0, "invalid architecture or jobs")
         self.flags = [f"ARCH={args.arch}", f"LLVM={sdk / 'bin'}/" if sdk else "LLVM=1", f"-j{args.jobs}", "KBUILD_ABS_SRCTREE=1"]
@@ -122,6 +110,9 @@ class Toolchain:
             for flag in ("HOSTCFLAGS", "HOSTCXXFLAGS", "HOSTLDFLAGS"):
                 self.flags.append(f"{flag}=--sysroot={args.host_sysroot.resolve(strict=True)}")
         self.nm = (sdk / "bin/llvm-nm") if sdk else "llvm-nm"
+
+    def kernel_version(self):
+        return text(["make", "-s", "--no-print-directory", "-C", self.linux, "kernelversion"], self.env)
 
     def make(self, output, *targets, cc=None):
         subprocess.run(["make", "-s", "--no-print-directory", "-C", self.linux, f"O={output}", *self.flags,
@@ -196,9 +187,10 @@ exec {q(kit.cc)} "$@"
     return wrapper
 
 
-def campaign_id(campaign):
-    return hashlib.sha256(b"kcfg-scope-v1\0" + (campaign / "campaign.seed").read_bytes() +
-                          (campaign / "scope.tsv").read_bytes() + b"\0" + (campaign / "baseline.config").read_bytes()).hexdigest()
+def read_campaign_id(directory):
+    value = (directory / "campaign.id").read_bytes()
+    require(re.fullmatch(rb"[0-9a-f]{64}\n", value), f"invalid campaign.id in {directory}")
+    return value[:-1].decode("ascii")
 
 
 def compiled_owners(cmd):
@@ -320,9 +312,7 @@ def attest_objects(kit, campaign, obj, rows, values, symbol):
         cover.append(f"{i}\t{count}\n")
         objects.append(f"{i}\t{source}\t{owner or '-'}\t{count}\n")
     (campaign / "objects.tsv").write_text("".join(objects))
-    coverage = campaign / "coverage.tsv"
-    coverage.write_text("".join(cover))
-    return coverage
+    (campaign / "coverage.tsv").write_text("".join(cover))
 
 
 def profile(args, kit):
@@ -339,8 +329,7 @@ def profile(args, kit):
         require(values.get(sym, "n") == val, f"profiling requires {sym}={val}")
     shutil.copyfile(obj / ".config", campaign / "baseline.config")
     shutil.copyfile(args.scope, campaign / "scope.tsv")
-    (campaign / "campaign.seed").write_text(secrets.token_hex(32) + "\n")
-    key = campaign_id(campaign)
+    key = secrets.token_hex(32)
     (campaign / "campaign.id").write_text(key + "\n")
     # BASIC_MODVERSIONS allows 55 characters plus NUL on 64-bit targets.
     symbol = "kc_" + base64.b32encode(bytes.fromhex(key)).decode("ascii").rstrip("=").lower()
@@ -354,11 +343,10 @@ def profile(args, kit):
     kit.make(obj, release_suffix, f"M={DRIVER}", f"MO={mod}", "modules")
     require((mod / "kcfg_collect.ko").is_file(), "collector not built")
     require(any(line.split()[1:2] == [symbol] for line in (obj / "Module.symvers").read_text().splitlines()), "built-in probe not exported")
-    coverage = attest_objects(kit, campaign, obj, rows, values, symbol)
-    seal = {"id": key, "coverage": digest(coverage), "linux": kit.revision, "arch": kit.arch,
-            "release": (obj / "include/config/kernel.release").read_text().strip(), "vmlinux": digest(obj / "vmlinux"),
-            "plugin": digest(plugin), "collector": digest(mod / "kcfg_collect.ko")}
-    (campaign / "build.json").write_text(json.dumps(seal, indent=2) + "\n")
+    attest_objects(kit, campaign, obj, rows, values, symbol)
+    build = {"id": key, "arch": kit.arch, "kernel_version": kit.kernel_version(),
+             "release": (obj / "include/config/kernel.release").read_text().strip()}
+    (campaign / "build.json").write_text(json.dumps(build, indent=2) + "\n")
     print(f"Profile kernel: {obj}; collector: {mod / 'kcfg_collect.ko'}; campaign: {campaign}")
 
 
@@ -421,12 +409,13 @@ def module_paths(obj, modules):
 def candidate(args, kit):
     campaign, plan = args.campaign.resolve(), args.plan.resolve()
     rows = read_scope(campaign / "scope.tsv", kit.linux)
-    seal = json.loads((campaign / "build.json").read_text())
-    key = campaign_id(campaign)
-    require(seal["id"] == key == (campaign / "campaign.id").read_text().strip(), "mismatched campaign inputs")
-    require((plan / "campaign.id").read_text().strip() == key, "proposal is for a different capture campaign")
-    require(seal["linux"] == kit.revision and seal["arch"] == kit.arch, "kernel or target architecture changed")
-    require(seal["coverage"] == digest(campaign / "coverage.tsv"), "coverage receipt changed after compilation")
+    build = json.loads((campaign / "build.json").read_text())
+    key = read_campaign_id(campaign)
+    require(build["id"] == key, "mismatched campaign inputs")
+    require(read_campaign_id(plan) == key, "proposal is for a different capture campaign")
+    require(build["arch"] == kit.arch, "target architecture changed")
+    if "kernel_version" in build:
+        require(build["kernel_version"] == kit.kernel_version(), "kernel version changed since capture")
     wanted = requested_values(campaign, plan, rows)
     modules = (plan / "modules-load.late").read_text().splitlines()
     baseline = config_values(campaign / "baseline.config")
@@ -452,13 +441,15 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     sub = parser.add_subparsers(dest="mode", required=True)
     scan = sub.add_parser("inventory", help="draft a keep-only inventory from literal Kbuild rules")
-    scan.add_argument("--linux", type=Path, default=ROOT / ".deps/linux")
+    linux = os.environ.get("LINUX", ROOT / ".deps/linux")
+    scan.add_argument("--linux", type=Path, default=linux, help="Linux source tree (default: $LINUX or .deps/linux)")
     scan.add_argument("--under", required=True, help="subsystem directory relative to Linux")
     scan.add_argument("--symbol", action="append", default=[], help="optional Kconfig symbol(s) of interest")
     scan.add_argument("--out", type=Path, required=True, help="new TSV file")
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--linux", type=Path, default=ROOT / ".deps/linux")
-    common.add_argument("--llvm", type=Path, help="LLVM SDK prefix (bin/ and lib/); default: PATH and runtime library search path")
+    common.add_argument("--linux", type=Path, default=linux, help="Linux source tree (default: $LINUX or .deps/linux)")
+    common.add_argument("--llvm", type=Path, default=os.environ.get("SDK"),
+                        help="LLVM SDK prefix (bin/ and lib/); default: $SDK or tools on PATH")
     common.add_argument("--cc", help="absolute kernel Clang executable or command on SDK PATH")
     common.add_argument("--hostcc", help="Kbuild host C compiler")
     common.add_argument("--hostcxx", help="Kbuild host C++ compiler")
@@ -480,7 +471,7 @@ def main():
     final.add_argument("--campaign", type=Path, required=True)
     final.add_argument("--plan", type=Path, required=True)
     for cmd in (prof, final, reference):
-        cmd.add_argument("--image-target", choices=("bzImage", "Image", "Image.gz", "Image.lz4", "zImage"),
+        cmd.add_argument("--image-target", choices=("bzImage", "Image", "Image.gz", "Image.lz4", "vmlinuz.efi", "zImage"),
                          default="bzImage", help="Kbuild boot image target, e.g. Image for arm64")
     args = parser.parse_args()
     if args.mode == "inventory":

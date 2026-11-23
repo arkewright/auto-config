@@ -4,7 +4,7 @@ set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
 default:
     @just --list
 
-# Reuse or fetch the pinned Linux and FTXUI sources and Ubuntu userspace.
+# Reuse local sources or fetch the selected Linux and FTXUI releases and Ubuntu userspace.
 sources:
     tools/sources.py
     qemu/guest.py fetch
@@ -20,7 +20,7 @@ host:
     cmake -S . -B "${HOST_BUILD:-build/host}" -G Ninja -DCMAKE_BUILD_TYPE=Release \
         -DCMAKE_C_COMPILER="${CC:-$sdk/bin/clang}" -DCMAKE_CXX_COMPILER="${CXX:-$sdk/bin/clang++}" \
         -DLLVM_DIR="$sdk/lib/cmake/llvm" -DClang_DIR="$sdk/lib/cmake/clang" \
-        -DFTXUI_SOURCE_DIR="${FTXUI_SOURCE_DIR:-$PWD/.deps/ftxui}" "${opts[@]}"
+        -DFTXUI_SOURCE_DIR="${FTXUI_SOURCE_DIR:-}" "${opts[@]}"
     cmake --build "${HOST_BUILD:-build/host}" --parallel "${JOBS:-8}"
 
 # Run component and host-boundary tests, without booting a VM.

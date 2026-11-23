@@ -1,5 +1,5 @@
-find_package(LLVM ${KCFG_LLVM_VERSION} EXACT CONFIG REQUIRED)
-find_package(Clang ${KCFG_LLVM_VERSION} EXACT CONFIG REQUIRED)
+find_package(LLVM CONFIG REQUIRED)
+find_package(Clang CONFIG REQUIRED)
 
 add_library(kcfg_frontend MODULE src/Instrument.cpp)
 set_target_properties(kcfg_frontend PROPERTIES PREFIX "")

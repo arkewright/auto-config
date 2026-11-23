@@ -47,7 +47,6 @@ struct Campaign {
 
 struct CampaignText {
     std::string_view id;
-    std::string_view seed;
     std::string_view baseline;
     std::string_view scope;
     std::string_view coverage;

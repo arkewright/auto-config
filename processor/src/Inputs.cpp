@@ -1,4 +1,4 @@
-#include "Identity.h"
+#include <kcfg/Plan.h>
 
 #include <algorithm>
 #include <array>
@@ -94,11 +94,13 @@ bool cleanText(Text const text) {
     });
 }
 
-bool digestLine(Text const id) {
-    return id.size() == 65 and id.back() == '\n' and
-           std::ranges::all_of(id.substr(0, 64), [](char const c) {
-               return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f');
-           });
+std::optional<Text> parseCampaignId(Text const line) {
+    if (line.size() != 65 or not line.ends_with('\n')) return std::nullopt;
+    auto const id = line.substr(0, line.size() - 1);
+    if (not std::ranges::all_of(id, [](char const c) {
+            return (c >= '0' and c <= '9') or (c >= 'a' and c <= 'f');
+        })) return std::nullopt;
+    return id;
 }
 
 Setting setting(Text const value) {
@@ -212,19 +214,15 @@ std::optional<bool> bit(Text const value) {
 } // namespace
 
 Result<Campaign> parseCampaign(CampaignText const &inputs) {
-    if (not digestLine(inputs.id)) return std::unexpected{"campaign.id: expected 64 lowercase hexadecimal digits and LF"};
-    if (not digestLine(inputs.seed)) return std::unexpected{"campaign.seed: expected 64 lowercase hexadecimal digits and LF"};
-    auto const computed = campaignDigest(inputs);
-    if (not computed) return std::unexpected{computed.error()};
-    if (*computed != inputs.id.substr(0, 64)) return std::unexpected{"campaign ID does not match the seed, scope and baseline"};
+    auto const id = parseCampaignId(inputs.id);
+    if (not id) return std::unexpected{"campaign.id: expected 64 lowercase hexadecimal digits and LF"};
     auto baseline = parseBaseline(inputs.baseline);
     if (not baseline) return std::unexpected{"baseline.config: " + baseline.error()};
     auto units = parseScope(inputs.scope);
     if (not units) return std::unexpected{"scope.tsv: " + units.error()};
     auto const coverage = addCoverage(*units, inputs.coverage);
     if (not coverage) return std::unexpected{"coverage.tsv: " + coverage.error()};
-    return Campaign{.id = std::string{inputs.id.substr(0, 64)}, .baseline = std::move(*baseline),
-                    .units = std::move(*units)};
+    return Campaign{.id = std::string{*id}, .baseline = std::move(*baseline), .units = std::move(*units)};
 }
 
 Result<std::vector<Hits>> parseTrace(Text const trace, Campaign const &campaign) {

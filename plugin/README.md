@@ -15,7 +15,7 @@
 
 ## 独立构建
 
-从仓库根目录运行。使用与加载插件的 Clang 同一发行版的 LLVM／Clang 头文件和库；默认版本为 23.1.4。自选宿主编译器和 glibc 时使用 `CMAKE_CXX_COMPILER` 和完整 `CMAKE_SYSROOT`，并保持与 Clang 的 C++ ABI 兼容。
+从仓库根目录运行。用加载插件的 Clang 所属 SDK 编译插件。23.1.4 是参考版本；可通过 `LLVM_DIR` 和 `Clang_DIR` 选择其他兼容的安装。自选宿主编译器和 glibc 时使用 `CMAKE_CXX_COMPILER` 和完整 `CMAKE_SYSROOT`，并保持与 Clang 的 C++ ABI 兼容。
 
 ```sh
 SDK="${SDK:-$PWD/.deps/llvm}"

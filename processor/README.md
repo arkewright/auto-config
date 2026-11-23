@@ -18,11 +18,11 @@ build/host/processor/kcfg-plan "$RUN/profile/campaign" \
 |---|---|
 | `baseline.config` | 完整基线，输出保留未变更条目的内容和顺序。 |
 | `scope.tsv` | 五列制表符分隔：连续编号、配置名、模块名、策略和相对源码路径。每行登记一个翻译单元。 |
-| `campaign.seed`、`campaign.id` | 各含 64 个小写十六进制字符和一个换行，绑定本次构建。 |
+| `campaign.id` | 采集构建时随机生成的标识，含 64 个小写十六进制字符和一个换行。 |
 | `coverage.tsv` | 每行记录编号和前端插入点数；对象含探针引用才记为正数。缺少该编号或数量为零时视为覆盖不足。 |
 | `trace.tsv` | 首行 `KCFG-TRACE`、版本 `1`、构建身份；每个编号一行，依次为编号、启动位、负载位、初始化位；末行为 `END` 和行数。各列用制表符分隔。 |
 
-身份是 SHA-256，输入依次为 `kcfg-scope-v1`、一个零字节、含换行的种子文件、清单文件、一个零字节、完整基线文件。它用于校对构建；来源可信性由构建与传输流程保证。处理器拒绝身份不符、重复编号、未知编号、截断快照和不一致的模块归属。模块名的连字符与下划线等价。
+处理器用 `campaign.id` 将快照归到同一次采集构建，旧版目录和快照沿用相同格式。输入含重复或未知编号、截断快照或不一致的模块归属时，处理器报错。模块名的连字符与下划线等价。
 
 ## 决策与交付
 
@@ -47,7 +47,7 @@ build/host/processor/kcfg-plan "$RUN/profile/campaign" \
 
 ## 独立构建
 
-使用 C++26、FTXUI 6.1.9 和 OpenSSL。可用已安装的 FTXUI 软件包，也可通过 `FTXUI_SOURCE_DIR` 指定本地源码。自选 glibc 用 `CMAKE_SYSROOT` 指定完整系统根；交叉编译可用 `CMAKE_TOOLCHAIN_FILE`。
+在 Linux 上使用支持 C++26 的 LLVM／Clang 和兼容的 FTXUI 构建。可用已安装的 FTXUI 软件包，也可通过 `FTXUI_SOURCE_DIR` 指定本地源码。项目默认获取 FTXUI 6.1.9，已安装的软件包不限定版本。自选 glibc 用 `CMAKE_SYSROOT` 指定完整系统根；交叉编译可用 `CMAKE_TOOLCHAIN_FILE`。
 
 ```sh
 SDK="${SDK:-$PWD/.deps/llvm}"

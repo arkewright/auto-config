@@ -2,7 +2,7 @@
 
 ## 准备工具链
 
-宿主机需要 Git、just、uv、Python 3.11 或更高版本、CMake 3.30 或更高版本、Ninja、OpenSSL 开发文件，以及目标内核的 Kbuild 依赖。常用依赖包括 GNU Make、flex、bison、bc、Perl、libelf、kmod 和编解码工具。虚拟机依赖见 [QEMU 验证器](../qemu/README.md#准备环境)。
+宿主机需要 just、uv、Python 3.11 或更高版本、CMake 3.30 或更高版本、Ninja，以及目标内核的 Kbuild 依赖。常用依赖包括 GNU Make、flex、bison、bc、Perl、libelf、kmod 和编解码工具；下载源码时需要 Git，启用内核模块签名时还需相应的密码库开发文件。虚拟机依赖见 [QEMU 验证器](../qemu/README.md#准备环境)。
 
 ```sh
 just sources
@@ -10,7 +10,9 @@ SDK="$PWD/.deps/llvm"
 SDK="$SDK" just check
 ```
 
-`just sources` 准备 Linux、FTXUI 和 Ubuntu 镜像。将 LLVM／Clang／LLD 23.1.4 安装在 `.deps/llvm`，或用 `SDK` 指定兼容的完整开发前缀。插件编译和加载时应使用同一套 Clang 可执行文件、头文件与库。需要从源码构建时：
+`just sources` 复用已有源码并准备 Ubuntu 镜像。仅在源码目录缺失时克隆：Linux、LLVM 源码和 FTXUI 默认分别取 `v7.4-rc3`、`llvmorg-23.1.4` 和 `v6.1.9`。首次下载可设置 `LINUX_REF`、`LLVM_REF`、`FTXUI_REF`，或传给 `tools/sources.py` 对应的 `--linux-ref`、`--llvm-ref`、`--ftxui-ref`，选择其他标签或分支。脚本不切换已有源码；要并存多个版本，用 `--cache` 指定新目录。
+
+已有板厂源码可用 `LINUX` 指定，`just sources` 直接复用，无需 Git 标签或 `.git` 目录。已有 LLVM 开发套件用 `SDK` 指定，例如 `SDK="$(llvm-config --prefix)" just check`。内核工具也接受显式的 `--linux` 和 `--llvm`。用同一套 Clang 可执行文件、头文件和库编译并加载插件；切换工具链时使用新的 `HOST_BUILD` 目录。需要从源码构建时：
 
 ```sh
 tools/sources.py --llvm-source
@@ -27,7 +29,7 @@ SDK="$SDK" just check
 |---|---|
 | C++26 插件与处理器 | `just host` 接受 `SDK`、`CC`、`CXX`、`SYSROOT`、`FTXUI_SOURCE_DIR`、`JOBS` 与 `HOST_BUILD`。自选 glibc 时使用包含头文件、加载器、C++ 标准库和依赖的完整系统根。 |
 | 内核与树外驱动 | `tools/kernel.py` 接受 `--llvm` 和 `--cc`；`--hostcc`、`--hostcxx` 和 `--host-sysroot` 用于构建 Kbuild 宿主工具。内核与驱动由 GNU C 编译，不链接 glibc。 |
-| 客体负载 | glibc 由 Ubuntu 根文件系统决定，通过 `--rootfs` 和 `--rootfs-sha256` 选择镜像。 |
+| 客体负载 | glibc 由 Ubuntu 根文件系统决定，用 `--rootfs` 指定可信来源的本地归档。 |
 
 ## 选择基线
 

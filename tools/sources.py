@@ -1,51 +1,52 @@
 #!/usr/bin/env -S uv run --no-project python -I
-"""Fetch exact upstream checkouts into a user-owned cache; never reset an existing checkout."""
+"""Reuse local source trees or clone a chosen tag or branch into an empty cache slot."""
 
 import argparse
+import os
 import subprocess
 import sys
 import tempfile
 from pathlib import Path
 
 REPOS = {
-    "linux": ("torvalds/linux", "v7.4-rc3", "aebb7274476403040d582c61478df8f4a7bf9cd3"),
-    "ftxui": ("ArthurSonzogni/FTXUI", "v6.1.9", "5cfed50702f52d51c1b189b5f97f8beaf5eaa2a6"),
-    "llvm-project": ("llvm/llvm-project", "llvmorg-23.1.4", "7a941dfb2877a0b8cf30323fefa85ad019e0b0f5"),
+    "linux": ("torvalds/linux", "v7.4-rc3", "Makefile"),
+    "ftxui": ("ArthurSonzogni/FTXUI", "v6.1.9", "CMakeLists.txt"),
+    "llvm-project": ("llvm/llvm-project", "llvmorg-23.1.4", "llvm/CMakeLists.txt"),
 }
 
 
-def verify(path, revision):
-    git = ["git", "-C", path]
-    head = subprocess.check_output([*git, "rev-parse", "HEAD"], text=True).strip()
-    changes = subprocess.check_output([*git, "status", "--porcelain", "--untracked-files=normal"])
-    if head != revision or changes:
-        raise ValueError(f"{path} is not a clean pinned checkout; use a new directory")
-
-
-def fetch(cache, name):
-    repo, tag, revision = REPOS[name]
-    target = cache / name
-    if target.exists():
-        verify(target, revision)
-    else:
-        with tempfile.TemporaryDirectory(dir=cache) as stage:
-            checkout = Path(stage) / "checkout"
-            subprocess.run(["git", "clone", "--depth", "1", "--single-branch", "--branch", tag,
-                            f"https://github.com/{repo}.git", checkout], check=True)
-            verify(checkout, revision)
-            checkout.rename(target)
-    print(f"{name} {tag}: {target}")
+def fetch(cache, name, ref, source=None):
+    repo, _, entry = REPOS[name]
+    target = source or cache / name
+    if source is not None or target.exists():
+        if not (target / entry).is_file():
+            raise ValueError(f"{target}: missing {entry}; use a source tree or a new cache")
+        print(f"Using existing {name}: {target}")
+        return
+    with tempfile.TemporaryDirectory(dir=cache) as stage:
+        checkout = Path(stage) / "checkout"
+        subprocess.run(["git", "clone", "--depth", "1", "--single-branch", "--branch", ref,
+                        f"https://github.com/{repo}.git", checkout], check=True)
+        checkout.rename(target)
+    print(f"Cloned {name} {ref}: {target}")
 
 
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--cache", type=Path, default=Path(__file__).resolve().parents[1] / ".deps")
+    parser.add_argument("--linux", dest="linux_tree", type=Path, default=os.environ.get("LINUX"),
+                        help="reuse an existing Linux source directory instead of fetching it (default: $LINUX)")
     parser.add_argument("--llvm-source", action="store_true", help="also fetch sources to build a private SDK")
+    for name, (_, default, _) in REPOS.items():
+        option = "llvm" if name == "llvm-project" else name
+        env = f"{option.upper()}_REF"
+        parser.add_argument(f"--{option}-ref", dest=name, metavar="REF", default=os.environ.get(env, default),
+                            help=f"tag or branch for a new {name} clone (default: ${env} or {default})")
     args = parser.parse_args()
     args.cache.mkdir(parents=True, exist_ok=True)
     for name in REPOS:
         if name != "llvm-project" or args.llvm_source:
-            fetch(args.cache, name)
+            fetch(args.cache, name, vars(args)[name], args.linux_tree if name == "linux" else None)
 
 
 if __name__ == "__main__":

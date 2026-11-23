@@ -4,7 +4,7 @@
 
 ## 快速上手
 
-参考环境：x86_64 QEMU、Ubuntu Base 24.04.4、Linux 7.4-rc3、LLVM／Clang／LLD 23.1.4、FTXUI 6.1.9。构建和模拟使用宿主机普通账户；客体初始进程负责挂载文件系统和加载模块。工具链准备见[使用指南](docs/usage.md#准备工具链)。
+参考环境：x86_64 QEMU、Ubuntu Base 24.04.4、Linux 7.4-rc3、LLVM／Clang／LLD 23.1.4、FTXUI 6.1.9。可通过 `LINUX` 和 `SDK` 选择板厂源码和其他兼容工具链。构建与模拟使用宿主机普通账户；客体初始进程负责挂载和加载模块。见[工具链准备](docs/usage.md#准备工具链)。
 
 ```sh
 just sources

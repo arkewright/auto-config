@@ -71,8 +71,8 @@ def experiment(args):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--out", type=Path, required=True, help="new experiment directory")
-    parser.add_argument("--llvm", type=Path, default=ROOT / ".deps/llvm")
-    parser.add_argument("--linux", type=Path, default=ROOT / ".deps/linux")
+    parser.add_argument("--llvm", type=Path, default=os.environ.get("SDK", ROOT / ".deps/llvm"))
+    parser.add_argument("--linux", type=Path, default=os.environ.get("LINUX", ROOT / ".deps/linux"))
     parser.add_argument("--host-build", type=Path, default=ROOT / "build/host")
     parser.add_argument("--jobs", type=int, default=min(8, len(os.sched_getaffinity(0))))
     parser.add_argument("--accel", choices=("auto", "kvm", "tcg"), default="auto")

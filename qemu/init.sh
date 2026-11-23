@@ -87,7 +87,5 @@ if [ "$mode" = profile ]; then
     stage=export
     [ -s /kernel-test/trace ]
     cat /kernel-test/trace > "$trace_port"
-    checksum=$(sha256sum /kernel-test/trace)
-    printf 'sha256=%s\n' "${checksum%% *}" >&3
 fi
 stage=complete

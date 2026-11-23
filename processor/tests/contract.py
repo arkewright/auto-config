@@ -1,7 +1,6 @@
 """Exercise the shipped executable, including failure-before-publication cases."""
 
 import concurrent.futures
-import hashlib
 import os
 import shutil
 import subprocess
@@ -39,21 +38,12 @@ ROWS = [
     ("MODULES", "-", "drop", "kernel/module/example.c"),
 ]
 HITS = {1: "0\t0\t1", 2: "0\t1\t0", 3: "0\t0\t1", 4: "1\t0\t0", 5: "0\t1\t0"}
+CAMPAIGN_ID = "0123456789abcdef" * 4
+OTHER_CAMPAIGN_ID = "d" * 64
 
 
-def make_id(campaign):
-    h = hashlib.sha256(b"kcfg-scope-v1\0")
-    for name in ("campaign.seed", "scope.tsv"):
-        h.update((campaign / name).read_bytes())
-    h.update(b"\0")
-    h.update((campaign / "baseline.config").read_bytes())
-    digest = h.hexdigest()
-    (campaign / "campaign.id").write_text(digest + "\n")
-    return digest
-
-
-def trace_for(digest, hits):
-    records = [f"KCFG-TRACE\t1\t{digest}"]
+def trace_for(campaign_id, hits):
+    records = [f"KCFG-TRACE\t1\t{campaign_id}"]
     for i in range(len(ROWS), 0, -1):  # The wire format does not require row order.
         records.append(str(i) + "\t" + hits.get(i, "0\t0\t0"))
     return "\n".join([*records, f"END\t{len(ROWS)}", ""])
@@ -77,14 +67,10 @@ class Contract(unittest.TestCase):
             "baseline.config": BASELINE,
             "scope.tsv": self.scope,
             "coverage.tsv": self.coverage,
-            "campaign.seed": "a" * 64 + "\n",
+            "campaign.id": CAMPAIGN_ID + "\n",
         }.items():
             (self.campaign / name).write_text(data)
-        self.bind()
-
-    def bind(self):
-        self.digest = make_id(self.campaign)
-        self.trace.write_text(trace_for(self.digest, HITS))
+        self.trace.write_text(trace_for(CAMPAIGN_ID, HITS))
 
     def plan(self, *extra, output=None):
         return subprocess.run(
@@ -100,10 +86,12 @@ class Contract(unittest.TestCase):
         proc = self.plan(*extra)
         self.assertEqual(proc.returncode, 0, proc.stderr)
 
-    def refused(self, *extra):
+    def refused(self, *extra, diagnostic=None):
         proc = self.plan(*extra)
         self.assertNotEqual(proc.returncode, 0, proc.stdout)
         self.assertTrue(proc.stderr)
+        if diagnostic is not None:
+            self.assertIn(diagnostic, proc.stderr)
         self.assertFalse(os.path.lexists(self.output))
         self.assertEqual(list(self.root.glob(".kcfg-plan-*")), [])
 
@@ -120,7 +108,7 @@ class Contract(unittest.TestCase):
             self.result("changes.tsv"), "CONFIG_IDLE\ty\tn\nCONFIG_LATE\ty\tm\n"
         )
         self.assertEqual(self.result("modules-load.late"), "already\nlate-io\n")
-        self.assertEqual(self.result("campaign.id"), self.digest + "\n")
+        self.assertEqual(self.result("campaign.id"), CAMPAIGN_ID + "\n")
         self.assertIn("CONFIG_IDLE\ty\tn\t0\t0\t1\t1\t1\t", self.result("report.tsv"))
         self.assertIn(
             "CONFIG_PARTIAL\ty\ty\t0\t0\t0\t1\t2\tincomplete", self.result("report.tsv")
@@ -128,16 +116,20 @@ class Contract(unittest.TestCase):
 
     def test_multiple_runs_conservative_union(self):
         second = self.root / "second"
-        second.write_text(trace_for(self.digest, {3: "0\t1\t0", 5: "1\t0\t0"}))
+        second.write_text(trace_for(CAMPAIGN_ID, {3: "0\t1\t0", 5: "1\t0\t0"}))
         self.ok("--also", second)
         self.assertEqual(self.result("requested.config"), BASELINE)
         self.assertEqual(self.result("changes.tsv"), "")
         self.assertEqual(self.result("modules-load.late"), "already\n")
 
-    def test_bad_second_run(self):
+    def test_primary_trace_from_different_campaign(self):
+        self.trace.write_text(trace_for(OTHER_CAMPAIGN_ID, HITS))
+        self.refused(diagnostic="wrong trace version or campaign ID")
+
+    def test_additional_trace_from_different_campaign(self):
         second = self.root / "second"
-        second.write_text(trace_for("d" * 64, {}))
-        self.refused("--also", second)
+        second.write_text(trace_for(OTHER_CAMPAIGN_ID, {}))
+        self.refused("--also", second, diagnostic="wrong trace version or campaign ID")
 
     def test_no_coverage_preserves_all(self):
         (self.campaign / "coverage.tsv").write_text("3\t0\n")
@@ -148,7 +140,6 @@ class Contract(unittest.TestCase):
     def test_no_module_support(self):
         text = BASELINE.replace("CONFIG_MODULES=y", "# CONFIG_MODULES is not set")
         (self.campaign / "baseline.config").write_text(text + "\n")
-        self.bind()
         self.ok()
         self.assertEqual(
             self.result("requested.config"),
@@ -167,7 +158,8 @@ class Contract(unittest.TestCase):
             valid.replace("4\t1\t0\t0\n", "65\t1\t0\t0\n"),
             valid.replace("4\t1\t0\t0\n", "4\t2\t0\t0\n"),
             valid.replace("KCFG-TRACE\t1", "KCFG-TRACE\t3"),
-            valid.replace(self.digest, "0" * 64),
+            valid.replace(CAMPAIGN_ID, CAMPAIGN_ID.upper()),
+            valid.replace(CAMPAIGN_ID, CAMPAIGN_ID + " "),
             valid.replace("5\t0\t1\t0", "5\t0\t1"),
             valid.replace("\n", "\r\n"),
         ]
@@ -198,7 +190,6 @@ class Contract(unittest.TestCase):
         for idx, text in enumerate(scopes):
             with self.subTest(case=idx):
                 (self.campaign / "scope.tsv").write_text(text)
-                self.bind()
                 self.refused()
 
     def test_invalid_coverage(self):
@@ -216,19 +207,32 @@ class Contract(unittest.TestCase):
                 (self.campaign / "coverage.tsv").write_text(self.coverage + row + "\n")
                 self.refused()
 
-    def test_mismatched_identity(self):
-        for name in ("scope.tsv", "baseline.config", "campaign.seed", "campaign.id"):
-            with self.subTest(file=name):
-                path = self.campaign / name
-                original = path.read_bytes()
-                altered = (
-                    b"c" * 64 + b"\n"
-                    if name.startswith("campaign.")
-                    else original + b"\n"
-                )
-                path.write_bytes(altered)
-                self.refused()
-                path.write_bytes(original)
+    def test_missing_campaign_id(self):
+        (self.campaign / "campaign.id").unlink()
+        self.refused(diagnostic="campaign.id:")
+
+    def test_malformed_campaign_id(self):
+        for text in (
+            "",
+            CAMPAIGN_ID,
+            CAMPAIGN_ID[:-1] + "\n",
+            CAMPAIGN_ID + "\n\n",
+            CAMPAIGN_ID + "\r\n",
+            CAMPAIGN_ID.upper() + "\n",
+            CAMPAIGN_ID[:-1] + "g\n",
+            CAMPAIGN_ID[:-1] + " \n",
+        ):
+            with self.subTest(text=text):
+                (self.campaign / "campaign.id").write_bytes(text.encode())
+                self.refused(diagnostic="campaign.id:")
+
+    def test_id_does_not_bind_valid_scope_contents(self):
+        (self.campaign / "scope.tsv").write_text(
+            self.scope.replace("idle\tdrop", "idle\tkeep")
+        )
+        self.ok()
+        self.assertEqual(self.result("changes.tsv"), "CONFIG_LATE\ty\tm\n")
+        self.assertEqual(self.result("campaign.id"), CAMPAIGN_ID + "\n")
 
     def test_malformed_baseline(self):
         for text in (
@@ -239,7 +243,6 @@ class Contract(unittest.TestCase):
         ):
             with self.subTest(text=text[-20:]):
                 (self.campaign / "baseline.config").write_bytes(text.encode())
-                self.bind()
                 self.refused()
 
     def test_existing_destination_untouched(self):
@@ -256,13 +259,13 @@ class Contract(unittest.TestCase):
         self.assertTrue(link.is_symlink())
         self.assertEqual((self.campaign / "baseline.config").read_text(), BASELINE)
         self.assertNotEqual(self.plan(output=self.trace).returncode, 0)
-        self.assertEqual(self.trace.read_text(), trace_for(self.digest, HITS))
+        self.assertEqual(self.trace.read_text(), trace_for(CAMPAIGN_ID, HITS))
 
     def test_concurrent_publish(self):
         with concurrent.futures.ThreadPoolExecutor(max_workers=4) as pool:
             results = list(pool.map(lambda _: self.plan(), range(4)))
         self.assertEqual(sum(proc.returncode == 0 for proc in results), 1)
-        self.assertEqual(self.result("campaign.id"), self.digest + "\n")
+        self.assertEqual(self.result("campaign.id"), CAMPAIGN_ID + "\n")
         self.assertEqual(list(self.root.glob(".kcfg-plan-*")), [])
 
     def test_review_requires_terminal(self):

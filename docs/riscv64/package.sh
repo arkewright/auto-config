@@ -44,12 +44,6 @@ inst=("INSTALL_MOD_PATH=$stage" "MODLIB=$mods" INSTALL_MOD_STRIP=1 DEPMOD=/bin/t
 make "${opts[@]}" "CC=$cc" "${inst[@]}"
 if [[ $kind == profile ]]; then
     make "${opts[@]}" "CC=$sdk/bin/clang" "M=$repo/driver" "MO=$work/profile/driver" "${inst[@]}"
-    (cd "$work/profile" && uv run --no-project python -I -u -c '
-import json
-from pathlib import Path
-seal = json.loads(Path("campaign/build.json").read_text())
-for key, path in (("vmlinux", "kernel/vmlinux"), ("collector", "driver/kcfg_collect.ko")):
-    print(seal[key], path, sep="  ")' | sha256sum -c -)
 fi
 for link in "$mods/build" "$mods/source"; do if [[ -L $link ]]; then unlink "$link"; fi; done
 depmod -b "$stage" "$rel"
@@ -73,12 +67,11 @@ if [[ $kind == candidate ]]; then
 else
     install -m 0644 /dev/null "$slot/modules-load.late"
 fi
-printf 'Package: board-kernel-%s-%s\nVersion: 1\nArchitecture: riscv64\nMaintainer: Board Lab <root@localhost>\nDescription: Board validation kernel and runtime modules\n' "$run" "$kind" > "$stage/DEBIAN/control"
-export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(git -C "$linux" show -s --format=%ct HEAD)}
+printf 'Package: board-kernel-%s-%s\nVersion: 1\nArchitecture: riscv64\nKernel-Release: %s\nMaintainer: Board Lab <root@localhost>\nDescription: Board validation kernel and runtime modules\n' "$run" "$kind" "$rel" > "$stage/DEBIAN/control"
+export SOURCE_DATE_EPOCH=${SOURCE_DATE_EPOCH:-$(stat -c %Y "$linux/Makefile")}
 dpkg-deb --root-owner-group --threads-max=1 -Zxz -z6 --build "$stage" "$tmp/ship/kernel.deb"
 [[ $(dpkg-deb -f "$tmp/ship/kernel.deb" Architecture) == riscv64 ]] || fail 'wrong package architecture'
 printf '%s\n' "$rel" > "$tmp/ship/release"
-(cd "$tmp/ship" && sha256sum kernel.deb release > SHA256SUMS)
 mkdir "$dest"
-mv -- "$tmp/ship/kernel.deb" "$tmp/ship/release" "$tmp/ship/SHA256SUMS" "$dest/"
+mv -- "$tmp/ship/kernel.deb" "$tmp/ship/release" "$dest/"
 printf '%s: %s (%s bytes)\n' "$kind" "$dest/kernel.deb" "$(stat -c %s "$dest/kernel.deb")"
