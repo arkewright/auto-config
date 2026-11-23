@@ -1,66 +1,62 @@
-# 从负载证据生成候选配置
+# 配置处理器
 
-处理程序只修改平台清单明确授权的选项。采集不到使用证据，不等于功能没有用；能否移除或推迟某项功能，先由平台维护者审定，再由采集结果限制。程序不自行安装模块，不覆盖原配置，也不以模拟器测试替代实板验收。
+`kcfg-plan` 将同一采集构建的快照按配置项合并，输出完整请求配置、变更理由和延迟模块列表。输入来自采集构建的 `campaign` 目录和成功负载的冻结快照。
 
-## 运行与审阅
-
-在仓库根目录运行。第一个参数是构建插桩内核时生成的采集目录，第二个是成功运行负载后冻结的快照，第三个必须是尚不存在的输出目录。父目录需要存在，无需管理员权限。
+## 使用与审阅
 
 ```sh
-build/processor/kcfg-plan build/profile/campaign build/guest/profile-01/trace.tsv build/proposal --review
+RUN=build/my-first-run
+build/host/processor/kcfg-plan "$RUN/profile/campaign" \
+  "$RUN/capture/trace.tsv" build/my-reviewed-plan --review
 ```
 
-上下键切换建议，空格接受或拒绝，`s` 保存，`q` 或退出键取消。审阅只允许撤回建议，不能强行关闭受保护项。取消时不创建输出目录，退出状态为 2。去掉 `--review` 即可批处理；使用 `--also` 可以合并同一插桩构建在多次独立启动中得到的快照：
+使用尚不存在的输出目录，父目录须已存在。`--review` 需要终端输入和输出：方向键选择建议，空格撤回或恢复，`s` 保存；`q`、Esc 或 Ctrl-C 取消，退出码为 2，无输出。省略 `--review` 可批处理；重复传入 `--also 路径` 可合并快照，启动、负载和初始化位分别取并集。
 
-```sh
-build/processor/kcfg-plan build/profile/campaign build/guest/read/trace.tsv build/proposal-union \
-  --also build/guest/write/trace.tsv --also build/guest/recovery/trace.tsv
-```
+## 输入协议
 
-每个编号的启动、负载和初始化命中分别取并集，不做计数相减。任何一次启动出现的早期使用都会保护对应选项，任何一个快照不完整都会阻止发布。
-
-## 输入与信任边界
-
-| 文件 | 作用 |
+| 文件 | 格式与用途 |
 |---|---|
-| `baseline.config` | 对应目标架构已经过 Kconfig 解析的完整基线，保留未选中条目的值、注释和顺序。 |
-| `scope.tsv` | 以制表符分隔连续编号、配置项、模块名、策略、源码相对路径五列，一个翻译单元一行。多个文件映射到同一配置项时，模块和策略必须一致。 |
-| `campaign.seed`、`campaign.id` | 绑定本轮构建，均为 64 个小写十六进制字符加换行；程序重算并核对身份后才解析配置。 |
-| `coverage.tsv` | 编号和编译阶段确认的入口数量，以制表符分隔。缺行或数量为零意味着覆盖不足，不等于没有运行。 |
-| `trace.tsv` | 首行为协议标记、版本和采集身份，之后每个编号恰好出现一次，携带启动、负载和初始化三个命中位，最后一行为结束标记和行数。 |
+| `baseline.config` | 完整基线，输出保留未变更条目的内容和顺序。 |
+| `scope.tsv` | 五列制表符分隔：连续编号、配置名、模块名、策略和相对源码路径。每行登记一个翻译单元。 |
+| `campaign.seed`、`campaign.id` | 各含 64 个小写十六进制字符和一个换行，绑定本次构建。 |
+| `coverage.tsv` | 每行记录编号和前端插入点数；对象含探针引用才记为正数。缺少该编号或数量为零时视为覆盖不足。 |
+| `trace.tsv` | 首行 `KCFG-TRACE`、版本 `1`、构建身份；每个编号一行，依次为编号、启动位、负载位、初始化位；末行为 `END` 和行数。各列用制表符分隔。 |
 
-身份摘要为 SHA-256，依次输入以下精确字节：前缀 `kcfg-scope-v1`、一个零字节、种子文件（含换行）、清单文件、一个零字节、完整基线文件。摘要用于防止串用，不是签名；构建主机、采集客体和传输链路均须可信。覆盖收据由候选内核构建步骤与原构建记录再次核对。
+身份是 SHA-256，输入依次为 `kcfg-scope-v1`、一个零字节、含换行的种子文件、清单文件、一个零字节、完整基线文件。它用于校对构建；来源可信性由构建与传输流程保证。处理器拒绝身份不符、重复编号、未知编号、截断快照和不一致的模块归属。模块名的连字符与下划线等价。
 
-非连续编号、重复来源、共享同一模块名的不同选项、过期身份、未知编号和截断快照均会被拒绝。模块名按内核惯例将连字符与下划线视为等价。输入接受普通文件；不要直接把仍在采集的设备或管道当作快照传入。
+## 决策与交付
 
-## 决策与输出
+保留范围外选项、`keep` 项、模块支持选项，以及启动命中、覆盖不足或基线未启用的选项。已启用且覆盖完整的选项按下列规则处理：
 
-按配置项合并所有清单行。范围外的配置保持原样。启动命中、覆盖不完整、基线未启用、非布尔或非三态值，以及 `keep` 策略均保持原值。模块支持选项本身始终保留。
-
-| 策略 | 提议条件 | 输出 |
+| 策略 | 条件 | 请求值 |
 |---|---|---|
-| `drop` | 所有登记文件均有插桩收据，启动和负载都没有命中。仅有初始化命中不算负载使用。 | 由 `y` 或 `m` 改为 `n`。 |
-| `defer` | 没有启动命中，所有登记文件均有覆盖，模块支持已内建，且清单给出明确模块名。允许负载阶段命中。 | 由 `y` 改为 `m`，或保持原有 `m`；加入延迟加载清单。 |
+| `drop` | 启动与负载均未命中。 | `n` |
+| `defer` | 启动未命中，模块支持已启用，且模块名明确。允许负载命中。 | `m`，并加入延迟清单。 |
 
-`coverage.tsv` 证明登记的文件含有探针，并不证明清单涵盖该选项的全部调用路径。只要仍有未评估的硬件、回退路径或初始化副作用，就应选用 `keep`。
+初始化命中单独记录。按[板级清单规则](../docs/usage.md#登记组件)决定哪些功能可关闭或延迟。
 
-输出在同一文件系统内先写入私有暂存目录，再一次发布，目标已存在即失败：
+| 产物 | 内容 |
+|---|---|
+| `requested.config` | 请求应用的完整配置，供候选构建运行 Kconfig。 |
+| `changes.tsv` | 配置项、原值和请求值。 |
+| `modules-load.late` | 延迟模块名，每行一项。 |
+| `report.tsv` | 聚合命中、覆盖数量和决定理由。 |
+| `campaign.id` | 供候选构建核对采集身份。 |
 
-- `requested.config` 是完整候选配置，不是已通过 Kconfig 和实板验收的最终配置。
-- `changes.tsv` 按配置项给出原值与请求值；`modules-load.late` 每行一个模块名，需要启动策略在预定阶段显式加载，单凭 `m` 不会控制加载时刻。
-- `report.tsv` 说明范围内每项的合并证据、已覆盖文件数、最终请求和保护或变更原因。
-- `campaign.id` 供后续构建检查候选与原采集构建的对应关系。
+处理器在同一文件系统的暂存目录写完所有产物后，一次发布到目标目录。
 
-## 独立构建与检查
+## 独立构建
 
-处理程序使用 C++26、FTXUI 6.1.9 和 OpenSSL 的摘要库。可使用已有的 FTXUI 软件包，也可显式指定已检出的源码目录；源码依赖不会在配置过程中隐式下载。以下示例单独构建处理程序，与仓库整体构建的可执行文件等价。
+使用 C++26、FTXUI 6.1.9 和 OpenSSL。可用已安装的 FTXUI 软件包，也可通过 `FTXUI_SOURCE_DIR` 指定本地源码。自选 glibc 用 `CMAKE_SYSROOT` 指定完整系统根；交叉编译可用 `CMAKE_TOOLCHAIN_FILE`。
 
 ```sh
+SDK="${SDK:-$PWD/.deps/llvm}"
+export PATH="$SDK/bin:$PATH" LD_LIBRARY_PATH="$SDK/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 cmake -S processor -B build/planner-only -G Ninja \
   -DCMAKE_CXX_COMPILER="$SDK/bin/clang++" -DFTXUI_SOURCE_DIR="$PWD/.deps/ftxui"
 cmake --build build/planner-only
 ctest --test-dir build/planner-only --output-on-failure
-uv run python -I processor/tests/contract.py build/planner-only/kcfg-plan --tmux
+uv run --no-project python -I processor/tests/contract.py build/planner-only/kcfg-plan --tmux
 ```
 
-自选 glibc 时传入 `-DCMAKE_SYSROOT=/path/to/sysroot`，并使用与该系统根匹配的 C++ 标准库、OpenSSL 和 FTXUI；单独替换运行时的 glibc 文件不是可移植的部署方式。交叉编译可通过 `CMAKE_TOOLCHAIN_FILE` 指定完整工具链。最后一条命令在独立终端中实际进行一次取消和一次拒绝后保存，要求宿主机具有 tmux。
+最后一条命令使用 tmux 验证交互审阅的保存和取消。
