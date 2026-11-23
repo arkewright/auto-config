@@ -29,6 +29,8 @@ static int kcfg_open(struct inode *inode, struct file *file)
 {
 	if (!capable(CAP_SYS_ADMIN))
 		return -EPERM;
+	/* misc_open leaves the device here; seq_open needs the slot. */
+	file->private_data = NULL;
 	return single_open(file, kcfg_show, NULL);
 }
 

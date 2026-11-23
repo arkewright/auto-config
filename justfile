@@ -1,22 +1,13 @@
 set shell := ["bash", "-eu", "-o", "pipefail", "-c"]
+set positional-arguments
 
-# Board operations and the optional QEMU recipes.
 default:
-    @./kcfg --help
     @just --list
 
-# Prepare the sources used by the selected toolchain.
-sources:
-    ./kcfg fetch
+# Run component tests built with the selected host configuration.
+check envfile=".env":
+    ROOT="$PWD"; source "$(realpath -- "$1")"; LD_LIBRARY_PATH="$LLVM_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ctest --test-dir "$HOST_BUILD" --no-tests=error --output-on-failure
 
-# Build the host plugin and processor (and LLVM if needed).
-host:
-    ./kcfg tools
-
-# Run component and workflow tests without touching a target board.
-check: host
-    LD_LIBRARY_PATH="${SDK:-${DEPS:-$PWD/.deps}/llvm}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}" ctest --test-dir "${HOST_BUILD:-build/host}" --output-on-failure
-
-# Run fresh baseline, profile, candidate and negative-control Ubuntu boots.
-demo output="build/demo": host
-    tools/demo.py --out "{{output}}" --llvm "${SDK:-${DEPS:-.deps}/llvm}" --linux "${LINUX:-${DEPS:-.deps}/linux}" --host-build "${HOST_BUILD:-build/host}" --jobs "${JOBS:-8}"
+# Exercise real builds, collection and replay in four fresh x86_64 Ubuntu guests.
+replay output envfile=".env":
+    qemu/replay.sh "$1" "$2"

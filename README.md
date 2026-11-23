@@ -1,30 +1,20 @@
-# 按板和负载裁剪 Linux 内核
+# 按开发板和负载裁剪 Linux 内核
 
-在 x86_64 主机上交叉编译，在 riscv64 板上运行真实负载。工具区分启动、负载和初始化命中，生成完整 `.config`，再比较基线和候选内核的运行包大小与启动时间。
-
-## 从这里开始
-
-[实板操作流程](docs/riscv64-board.md)按执行顺序列出主机和 Ubuntu 板端的命令：安装依赖、换核、采集、裁剪、回放、比较。主机从这几行开始：
+在 x86_64 主机上编译；在 Ubuntu 板上启动采集内核、运行负载，然后把快照传回主机生成候选 `.config`。每次内核构建都直接产出可部署的 `.tar.gz`。
 
 ```bash
-cp examples/board.env board.env
-${EDITOR:-vi} board.env
-source ./board.env
-./kcfg tools && ./kcfg config
+cp .env.example .env
+${EDITOR:-vi} .env
+./kcfg --init-deps
+./kcfg --build-tools
+./kcfg --build-kernel profile
 ```
 
-`tools` 自动获取缺少的源码并编译工具，也可复用已有依赖。`config` 从原生 `allyesconfig` 建立基线。基线、采集版和候选版各自打成一个 `.tar.gz`，传到板上后由用户在本机安装并重启。
+默认面向 x86_64，构建 `bzImage` 和模块。在 `.env` 把 `ARCH` 改为 `riscv` 即改用 RISC-V 的 `Image`、模块和设备树。[配置模板](.env.example)逐项说明了主机设置；入口自动读取 `.env`。可以直接填写板厂源码、已有 LLVM 安装和板子的完整 `.config`。填写允许关闭或推迟加载的选项后，处理器才会建议裁剪。
 
-| 关心的结果 | 主机上的位置 |
-|---|---|
-| 原生配置与必要调整 | `$WORK/config/native.config`、`$WORK/config/changes.tsv` |
-| 负载快照与裁剪理由 | `$WORK/trace.tsv`、`$WORK/plan/report.tsv` |
-| 最终配置与可安装的内核包 | `$WORK/candidate/.config`、`$WORK/packages/candidate.tar.gz` |
-| 包体积和启动时间差异 | `./kcfg compare` |
+默认部署包是 `build/board/packages/kernel-profile.tar.gz`。在板上解压并运行包内的 `deploy.sh` 即可按版本安装新内核、生成 initramfs 并更新 GRUB 菜单。脚本可直接查看和修改。
 
-## 参考
-
-- [脚本使用说明](docs/usage.md)：命令、变量、包内容、策略和指标。
-- [架构](docs/architecture.md)：插桩、采集窗口和配置决策。
-- [参考平台验收](docs/validation.md)：x86_64 QEMU 的四次启动结果及复现命令。
-- [Clang 插件](plugin/README.md)、[配置处理器](processor/README.md)、[QEMU 验证器](qemu/README.md)：组件独立使用说明。
+- [实板教程](docs/board.md)：从准备依赖到运行负载、取回快照和回放候选内核。
+- [脚本参考](docs/usage.md)：入口参数、配置示例、包内容及部署行为。
+- [采集与裁剪原理](docs/architecture.md)：启动、负载、初始化命中如何决定配置。
+- [开发测试记录](docs/validation.md)：独立的 QEMU 回归测试和实测范围。

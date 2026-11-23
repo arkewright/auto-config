@@ -2,22 +2,29 @@
 # Exercise the real initcall boundary independently of workload collection.
 set -euo pipefail
 if (( $# != 2 )); then
-    printf 'usage: %s PROFILE_DIR NEW_RESULT_DIR\n' "$0" >&2
+    printf 'usage: %s QEMU_REPLAY_DIR NEW_RESULT_DIR\n' "$0" >&2
     exit 2
 fi
-root=$(realpath "$(dirname "$0")/..")
-profile=$(realpath "$1")
-result=$(realpath -m "$2")
-sdk=$(realpath "${SDK:-$root/.deps/llvm}")
-linux=$(realpath "${LINUX:-$root/.deps/linux}")
-export PATH="$sdk/bin:$PATH" LD_LIBRARY_PATH="$sdk/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-cmp "$profile/campaign/scope.tsv" "$root/examples/qemu.scope.tsv"
-read -r id < "$profile/campaign/campaign.id"
+ROOT=$(realpath "$(dirname "$0")/..")
+replay=$(realpath -- "$1")
+result=$(realpath -m -- "$2")
+cd -- "$ROOT"
+source "$replay/replay.env"
+export PATH="$LLVM_PREFIX/bin:$PATH" LD_LIBRARY_PATH="$LLVM_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+profile="$replay/profile"
+release=$(<"$profile/kernel/include/config/kernel.release")
 mkdir -- "$result"
-make -s -C "$linux" O="$profile/kernel" LLVM="$sdk/bin/" LOCALVERSION="-kcfg-${id:0:16}" \
-    M="$root/tests/initializer" MO="$result/module" KCFG_HEADER="$profile/campaign/bridge-config.h" modules
-"$root/qemu/guest.py" run --mode profile --kernel "$profile/kernel/arch/x86/boot/bzImage" \
+host_flags=("HOSTCC=$HOSTCC" "HOSTCXX=$HOSTCXX")
+if [[ -n $SYSROOT ]]; then
+    for flag in HOSTCFLAGS HOSTCXXFLAGS HOSTLDFLAGS; do host_flags+=("$flag=--sysroot=$SYSROOT"); done
+fi
+make -s -C "$LINUX_SRC" "O=$profile/kernel" "ARCH=$ARCH" "LLVM=$LLVM_PREFIX/bin/" "CC=$KERNEL_CC" \
+    "${host_flags[@]}" "KERNELRELEASE=$release" "M=$ROOT/tests/initializer" \
+    "MO=$result/module" "KCFG_HEADER=$profile/campaign/bridge-config.h" modules
+args=(--accel "${QEMU_ACCEL:-auto}" --busybox "${QEMU_BUSYBOX:-busybox}")
+if [[ -n ${QEMU_ROOTFS:-} ]]; then args+=(--rootfs "$QEMU_ROOTFS"); fi
+"$PYTHON" -I qemu/guest.py run --mode profile --kernel "$profile/kernel/arch/x86/boot/bzImage" \
     --module "$profile/driver/kcfg_collect.ko" --late-module "$result/module/kcfg_initializer_test.ko" \
-    --workload "$root/tests/window.sh" --output "$result/guest"
+    --workload tests/window.sh --output "$result/guest" "${args[@]}"
 rg --quiet '^3\t0\t0\t1$' "$result/guest/trace.tsv"
 printf 'Initializer helper was observed only in initialization context.\n'

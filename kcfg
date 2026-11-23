@@ -1,46 +1,168 @@
 #!/usr/bin/env bash
-# Host commands for an x86_64 builder and a riscv64 board.
 set -euo pipefail
 
 usage() {
     printf '%s\n' \
-        'Usage: ./kcfg COMMAND' \
-        '  fetch                         fetch missing source dependencies' \
-        '  tools                         fetch, build or reuse LLVM, build plugin and processor' \
-        '  config                        native allyesconfig, then necessary board adjustments' \
-        '  build baseline|profile|candidate  build the image, modules and device trees' \
-        '  pack baseline|profile|candidate   write WORK/packages/<kind>.tar.gz' \
-        '  plan [TRACE] [--also TRACE]... [--review]  propose changes (default: WORK/trace.tsv)' \
-        '  compare                       compare baseline and candidate packages and boot times' \
-        'Settings and board commands: docs/riscv64-board.md and docs/usage.md'
+        'Usage: ./kcfg [--env FILE] ACTION' \
+        '  --init-deps                         clone missing source dependencies' \
+        '  --build-tools                       build or reuse LLVM, then build the plugin and processor' \
+        '  --build-kernel [profile|baseline|candidate]   configure, build and package (default: profile)' \
+        '  --plan [--review]                   process the returned workload trace(s)' \
+        'Settings: cp .env.example .env and edit .env; board instructions: docs/board.md'
+}
+fail() { printf 'kcfg: %s\n' "$*" >&2; exit 1; }
+invalid() { usage >&2; exit 2; }
+ROOT=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd -P)
+settings="$ROOT/.env"
+if [[ ${1:-} == --env ]]; then
+    (( $# >= 2 )) || invalid
+    settings=$(realpath -m -- "$2"); shift 2
+fi
+action=${1:---help}
+case $action in
+    --help|-h) usage; exit 0 ;;
+    --init-deps|--build-tools) (( $# == 1 )) || invalid ;;
+    --build-kernel) (( $# <= 2 )) && [[ ${2:-profile} =~ ^(baseline|profile|candidate)$ ]] || invalid ;;
+    --plan) (( $# == 1 )) || { (( $# == 2 )) && [[ $2 == --review ]]; } || invalid ;;
+    *) invalid ;;
+esac
+cd -- "$ROOT"
+[[ -f $settings ]] || fail "no settings at $settings; copy .env.example to .env first"
+source "$settings"
+# Kbuild and the compiler wrapper change directory. Resolve host paths once, here.
+for key in LINUX_SRC LLVM_SRC LLVM_PREFIX FTXUI_SRC FTXUI_DIR LLVM_BUILD HOST_BUILD SYSROOT WORK \
+           KERNEL_CONFIG SCOPE TRACE PACKAGE_DIR DEPLOY_SCRIPT; do
+    if [[ -n ${!key} ]]; then printf -v "$key" '%s' "$(realpath -m -- "${!key}")"; fi
+done
+for key in BOOTSTRAP_CC BOOTSTRAP_CXX TOOLS_CC TOOLS_CXX KERNEL_CC HOSTCC HOSTCXX; do
+    if [[ ${!key} == */* && ${!key} != /* ]]; then printf -v "$key" '%s' "$(realpath -ms -- "${!key}")"; fi
+done
+export PATH="$LLVM_PREFIX/bin:$PATH" LD_LIBRARY_PATH="$LLVM_PREFIX/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+
+build_llvm_from_source() {
+    case $LLVM_MODE in
+        source) return 0 ;;
+        installed) return 1 ;;
+        auto) [[ ! -x $LLVM_PREFIX/bin/llvm-config || ! -x $LLVM_PREFIX/bin/clang || ! -x $LLVM_PREFIX/bin/ld.lld ]] ;;
+        *) fail 'LLVM_MODE must be auto, source or installed' ;;
+    esac
 }
 
-case ${1:-help} in help|-h|--help) usage; exit 0 ;; esac
-command=$1; shift
-case $command in
-    fetch|tools|config|compare) [[ $# == 0 ]] || { usage >&2; exit 2; } ;;
-    build|pack) [[ $# == 1 && $1 =~ ^(baseline|profile|candidate)$ ]] || { usage >&2; exit 2; } ;;
-    plan) ;;
-    *) usage >&2; exit 2 ;;
-esac
+clone_source() {
+    local dir=$1 entry=$2 url=$3 ref=$4 branch=()
+    if [[ -f $dir/$entry ]]; then printf 'Using %s\n' "$dir"; return; fi
+    if [[ -n $ref ]]; then branch=(--branch "$ref"); fi
+    mkdir -p -- "$(dirname -- "$dir")"
+    git clone --depth 1 --single-branch "${branch[@]}" -- "$url" "$dir"
+}
 
-ROOT=$(cd -- "$(dirname -- "$0")" && pwd -P)
-DEPS=$(realpath -m -- "${DEPS:-$ROOT/.deps}")
-WORK=$(realpath -m -- "${WORK:-$ROOT/build/board}")
-LINUX=$(realpath -m -- "${LINUX:-$DEPS/linux}")
-SDK=$(realpath -m -- "${SDK:-$DEPS/llvm}")
-HOST_BUILD=$(realpath -m -- "${HOST_BUILD:-$ROOT/build/host}")
-export ROOT DEPS WORK LINUX SDK HOST_BUILD
-export JOBS=${JOBS:-8} IMAGE_TARGET=${IMAGE_TARGET:-Image} PYTHON=${PYTHON:-python3}
-export PATH="$SDK/bin:$PATH" LD_LIBRARY_PATH="$SDK/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
+init_deps() {
+    clone_source "$LINUX_SRC" Makefile "$LINUX_URL" "$LINUX_REF"
+    if [[ -z $FTXUI_DIR ]]; then clone_source "$FTXUI_SRC" CMakeLists.txt "$FTXUI_URL" "$FTXUI_REF"; fi
+    if build_llvm_from_source; then clone_source "$LLVM_SRC" llvm/CMakeLists.txt "$LLVM_URL" "$LLVM_REF"; fi
+}
 
-case $command in
-    fetch|tools) exec bash "$ROOT/scripts/host/tools.sh" "$command" ;;
-    config|build) exec bash "$ROOT/scripts/host/kernel.sh" "$command" "$@" ;;
-    pack) exec bash "$ROOT/scripts/host/pack.sh" "$@" ;;
-    plan)
-        trace="$WORK/trace.tsv"
-        if [[ $# -gt 0 && $1 != -* ]]; then trace=$1; shift; fi
-        exec "$HOST_BUILD/processor/kcfg-plan" "$WORK/profile/campaign" "$trace" "$WORK/plan" "$@" ;;
-    compare) exec "$PYTHON" -I "$ROOT/scripts/host/compare.py" "$WORK" ;;
+build_tools() {
+    local sysroot=() ftxui=$FTXUI_SRC cmakedir
+    if [[ -n $SYSROOT ]]; then sysroot=("-DCMAKE_SYSROOT=$SYSROOT"); fi
+    if build_llvm_from_source; then
+        cmake -S "$LLVM_SRC/llvm" -B "$LLVM_BUILD" -G "$CMAKE_GENERATOR" \
+            "-DCMAKE_INSTALL_PREFIX=$LLVM_PREFIX" "-DCMAKE_C_COMPILER=$BOOTSTRAP_CC" \
+            "-DCMAKE_CXX_COMPILER=$BOOTSTRAP_CXX" "${sysroot[@]}" "${LLVM_CMAKE_ARGS[@]}"
+        cmake --build "$LLVM_BUILD" --parallel "$JOBS" --target install
+    fi
+    if [[ -n $FTXUI_DIR ]]; then ftxui=; fi
+    cmakedir=$("$LLVM_PREFIX/bin/llvm-config" --cmakedir)
+    cmake -S "$ROOT" -B "$HOST_BUILD" -G "$CMAKE_GENERATOR" \
+        "-DCMAKE_C_COMPILER=$TOOLS_CC" "-DCMAKE_CXX_COMPILER=$TOOLS_CXX" \
+        "-DLLVM_DIR=$cmakedir" "-DClang_DIR=${cmakedir%/*}/clang" \
+        "-DFTXUI_SOURCE_DIR=$ftxui" "-Dftxui_DIR=$FTXUI_DIR" "${sysroot[@]}" "${TOOLS_CMAKE_ARGS[@]}"
+    cmake --build "$HOST_BUILD" --parallel "$JOBS"
+}
+
+# Builds and install targets use the same compiler, release and user-supplied flags.
+kmake() {
+    make -s --no-print-directory -C "$LINUX_SRC" -j"$JOBS" "O=$obj" "ARCH=$ARCH" \
+        "LLVM=$LLVM_PREFIX/bin/" "HOSTCC=$HOSTCC" "HOSTCXX=$HOSTCXX" "${host_flags[@]}" "${KBUILD_ARGS[@]}" \
+        KBUILD_ABS_SRCTREE=1 KCONFIG_CONFIG=.config "LOCALVERSION=$localversion" "CC=$compiler" "$@"
+}
+
+configure_kernel() {
+    if [[ $role == candidate ]]; then
+        cp -- "$WORK/plan/requested.config" "$obj/.config"
+    elif [[ -n $KERNEL_CONFIG ]]; then
+        cp -- "$KERNEL_CONFIG" "$obj/.config"
+    else
+        kmake allyesconfig
+        cp -- "$obj/.config" "$WORK/$role/allyes.config"
+        "$LINUX_SRC/scripts/config" --file "$obj/.config" -e MODULES -e TRACEPOINTS -d TRIM_UNUSED_KSYMS
+    fi
+    if [[ $role != candidate ]] && (( ${#CONFIG_OPTIONS[@]} )); then
+        "$LINUX_SRC/scripts/config" --file "$obj/.config" "${CONFIG_OPTIONS[@]}"
+    fi
+    kmake olddefconfig
+}
+
+capture() { "$PYTHON" -I "$ROOT/scripts/capture.py" "$@"; }
+
+build_kernel() {
+    local role=$1 obj="$WORK/$1/kernel" compiler localversion="$RELEASE_SUFFIX-$1" campaign="$WORK/profile/campaign"
+    local host_flags=() policy=() key id image boot_tree="arch/$ARCH/boot"
+    unset KCONFIG_ALLCONFIG KBUILD_OUTPUT KBUILD_EXTMOD KBUILD_EXTMOD_OUTPUT MAKEFLAGS MFLAGS
+    case $ARCH in
+        x86|x86_64|i386) image=bzImage; boot_tree=arch/x86/boot ;;
+        arm) image=zImage ;;
+        *) image=Image ;;
+    esac
+    if (( ! ${#KERNEL_TARGETS[@]} )); then
+        KERNEL_TARGETS=("$image" modules)
+        if [[ -d $LINUX_SRC/$boot_tree/dts ]]; then KERNEL_TARGETS+=(dtbs); fi
+    fi
+    : "${KERNEL_IMAGE:=$boot_tree/${KERNEL_TARGETS[0]}}"
+    if [[ $role == candidate && ! -f $WORK/plan/requested.config ]]; then fail 'run --plan before building the candidate'; fi
+    if [[ $role == profile || ( $role == candidate && -s $WORK/plan/modules-load.late ) ]]; then
+        [[ " ${KERNEL_TARGETS[*]} " == *' modules '* ]] || fail 'include modules in KERNEL_TARGETS for the collector or deferred modules'
+    fi
+    compiler=$(command -v -- "$KERNEL_CC") || fail "Clang not found: $KERNEL_CC"
+    if [[ $compiler != /* ]]; then compiler="$ROOT/$compiler"; fi
+    KERNEL_CC=$compiler
+    if [[ -n $SYSROOT ]]; then
+        host_flags=("HOSTCFLAGS=--sysroot=$SYSROOT" "HOSTCXXFLAGS=--sysroot=$SYSROOT" "HOSTLDFLAGS=--sysroot=$SYSROOT")
+    fi
+    mkdir -p -- "$WORK/$role"
+    mkdir -- "$obj" || fail "use a new WORK or move the previous $WORK/$role before rebuilding"
+    configure_kernel
+    if [[ $role == profile ]]; then
+        if [[ -n $SCOPE ]]; then policy=(--scope "$SCOPE"); else
+            for key in "${DROP[@]}"; do policy+=(--drop "$key"); done
+            for key in "${DEFER[@]}"; do policy+=(--defer "$key"); done
+        fi
+        capture prepare --linux "$LINUX_SRC" --cc "$compiler" --plugin "$HOST_BUILD/plugin/kcfg_frontend.so" \
+            --config "$obj/.config" --campaign "$campaign" "${policy[@]}"
+        id=$(<"$campaign/campaign.id"); localversion+="-${id:0:16}"
+        compiler="$campaign/clang"
+    elif [[ $role == candidate ]]; then
+        capture candidate --linux "$LINUX_SRC" --campaign "$campaign" --plan "$WORK/plan" --config "$obj/.config" --arch "$ARCH"
+    fi
+    kmake "${KERNEL_TARGETS[@]}"
+    if [[ $role == profile ]]; then
+        kmake "CC=$KERNEL_CC" "M=$ROOT/driver" "MO=$WORK/profile/driver" modules
+        capture coverage --linux "$LINUX_SRC" --nm "$LLVM_PREFIX/bin/llvm-nm" --campaign "$campaign" --obj "$obj" --arch "$ARCH"
+    fi
+    source "$ROOT/scripts/bundle.bash"
+    package_kernel
+    cp -- "$obj/.config" "$WORK/$role/.config"
+}
+
+process_trace() {
+    local options=() trace
+    for trace in "${EXTRA_TRACES[@]}"; do options+=(--also "$trace"); done
+    "$HOST_BUILD/processor/kcfg-plan" "$WORK/profile/campaign" "$TRACE" "$WORK/plan" "${options[@]}" "$@"
+}
+
+case $action in
+    --init-deps) init_deps ;;
+    --build-tools) build_tools ;;
+    --build-kernel) build_kernel "${2:-profile}" ;;
+    --plan) shift; process_trace "$@" ;;
 esac

@@ -1,45 +1,38 @@
-# Ubuntu 客体验证器
+# QEMU 开发测试
 
-验证器用指定的 x86_64 Linux 内核启动 Ubuntu Base，在新建的内存根文件系统中运行负载。宿主机使用普通账户；挂载和模块加载由客体初始进程完成。虚拟机不连接网络或映射宿主目录。
+QEMU 在宿主机上引导 x86_64 内核和 Ubuntu Base，用于回归采集、裁剪与负载回放。实板构建和部署不需要 QEMU。
 
-## 准备环境
+## 四次启动
 
-宿主机需要 Python 3.11 或更高版本、uv、QEMU、bsdtar、readelf 和 x86_64 静态 BusyBox；下载时需 curl，加载显式模块时需宿主机的 `modinfo`。可用 `--qemu` 和 `--busybox` 指定程序。`/dev/kvm` 可读写时默认使用硬件加速，也可显式指定 `--accel tcg` 使用软件模拟。
+先用项目 `.env` 选择 Linux 源码和带 X86 后端的 LLVM，在宿主机上构建插件和处理器。QEMU 测试额外使用 `qemu-system-x86_64`、静态 x86_64 BusyBox、bsdtar、readelf、modinfo 和 ripgrep。首次下载 Ubuntu Base 用到 curl。
 
 ```sh
-qemu/guest.py fetch
+./kcfg --init-deps
+./kcfg --build-tools
+qemu/replay.sh build/qemu-01 .env
 ```
 
-默认镜像为 [Ubuntu Base 24.04.4 amd64](https://cdimage.ubuntu.com/ubuntu-base/releases/24.04.4/release/) 的 `ubuntu-base-24.04.4-base-amd64.tar.gz`。下载使用 HTTPS，成功后将非空归档移入缓存。离线运行可用 `--rootfs /path/to/archive.tar.gz` 指定可信的本地归档。验证器直接从归档生成内存启动镜像，不向宿主目录解包。
+最后一条也可写成 `just replay build/qemu-01`。使用尚不存在的输出目录；脚本继承指定配置中的工具链和宿主构建位置，使用独立的 x86_64 配置、观测清单和包目录。它以 `allnoconfig` 和两个客体片段生成测试基线，再通过 `./kcfg --env` 编译基线、采集版、候选版，运行[四次启动](../docs/validation.md#复现)。
 
-客体需提供 `/bin/sh`、`mount`、`cat`、`uname`、`sleep` 和负载所需的程序与运行库。将 `qemu/guest.config` 合入目标内核配置，保持串口、PCI virtio 控制台、内存启动镜像和所需文件系统内建。
-
-## 启动与采集
-
-每次运行使用新输出目录。以下路径以 `just demo build/my-first-run` 的产物为例：
+默认首次启动时下载 Ubuntu Base 24.04.4 amd64，之后复用缓存。离线时可指定本机归档：
 
 ```sh
-RUN=build/my-first-run
-qemu/guest.py run --mode baseline --kernel "$RUN/plain/arch/x86/boot/bzImage" \
-  --workload examples/workload.sh --output build/guest/baseline-01
+QEMU_ROOTFS=/data/ubuntu-base-24.04.4-base-amd64.tar.gz qemu/replay.sh build/qemu-02 .env
+```
+
+可用 `QEMU_BUSYBOX` 指定静态 BusyBox，`QEMU_ACCEL=tcg` 强制软件模拟。默认在 `/dev/kvm` 可用时启用硬件加速。
+
+## 单次启动与排查
+
+也可在已有的测试构建上运行其他负载。例如，从仓库根目录启动采集版并运行自带的配置读取负载：
+
+```sh
+RUN=build/qemu-01
 qemu/guest.py run --mode profile --kernel "$RUN/profile/kernel/arch/x86/boot/bzImage" \
-  --module "$RUN/profile/driver/kcfg_collect.ko" \
-  --workload examples/workload.sh --output build/guest/profile-01
-qemu/guest.py run --mode candidate --kernel "$RUN/candidate/kernel/arch/x86/boot/bzImage" \
-  --late-module "$RUN/candidate/kernel/kernel/configs.ko" \
-  --workload examples/workload.sh --output build/guest/candidate-01
+  --module "$RUN/profile/driver/kcfg_collect.ko" --workload examples/workload.sh \
+  --output "$RUN/guests/second-profile"
 ```
 
-客体确认发行版为 Ubuntu，并核对模块与运行中的内核版本一致，再按 `--module` 顺序预加载模块并报告就绪。`profile` 模式随后启动采集。各模式再按 `--late-module` 顺序加载模块并运行负载；负载成功退出后，采集版冻结并导出快照。显式加载使用未压缩的 `.ko`，硬依赖排在使用者前；启用强制签名时使用内核信任的密钥。
+直接运行 `guest.py` 使用 uv，也可用 Python 3.11 或更新版本通过 `python3 -I qemu/guest.py` 调用。`--module` 在就绪前加载，`--late-module` 在就绪后、负载前加载；二者使用与目标内核匹配的未压缩 `.ko`，按依赖顺序传入。`--payload` 将额外文件放入客体的 `/kernel-test/input/`。`--rootfs` 指定单次启动的 Ubuntu 归档。
 
-`--workload` 接受可执行程序或带解释器声明的脚本，以退出状态报告结果。`--payload` 可重复，将文件放入客体的 `/kernel-test/input/`。需要在负载中途加载的模块可作为输入文件传入，由负载核对版本和依赖后调用 `/kernel-test/busybox insmod`。
-
-## 输出与排查
-
-| 文件 | 内容 |
-|---|---|
-| `guest.status` | 发行版、内核版本、就绪状态、延迟加载数量和退出结果。 |
-| `console.log` | 客体启动日志和负载输出。 |
-| `trace.tsv` | 仅由 `profile` 模式生成。客体报告成功后，宿主机核对快照格式、记录编号和末行声明的记录数，再发布文件。 |
-
-默认两颗虚拟处理器、1536 MiB 内存和 180 秒超时，可用 `--cpus`、`--memory`、`--timeout` 调整。遇到失败，先用 `guest.status` 定位阶段，再在 `console.log` 核对启动驱动、模块版本及签名或负载输出。重新启动时使用新目录。
+每次运行从归档生成内存启动镜像。客体报告就绪后运行负载；采集版在负载成功后冻结并输出 `trace.tsv`。在该次启动的输出目录先看 `guest.status` 中的执行阶段，再查 `console.log` 中的内核与负载输出。客体规模和时限可通过 `--cpus`、`--memory`、`--timeout` 调整。

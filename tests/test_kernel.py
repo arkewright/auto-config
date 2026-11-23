@@ -1,5 +1,4 @@
 import json
-import os
 import runpy
 import shutil
 import subprocess
@@ -7,198 +6,188 @@ import sys
 import tempfile
 import unittest
 from pathlib import Path
-from types import SimpleNamespace
-from unittest.mock import patch
 
-TOOLS = Path(__file__).resolve().parents[1] / "tools"
-BUILD = runpy.run_path(str(TOOLS / "kernel.py"))
+CAPTURE = Path(__file__).resolve().parents[1] / "scripts/capture.py"
+DATA = runpy.run_path(str(CAPTURE))
 
 
-class SourceTests(unittest.TestCase):
-    def test_external_linux_tree_skips_default_clone(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            cache, board = root / "cache", root / "vendor"
-            (cache / "ftxui").mkdir(parents=True)
-            (cache / "ftxui/CMakeLists.txt").touch()
-            board.mkdir()
-            (board / "Makefile").touch()
-            env = dict(os.environ, LINUX=str(board), GIT_ALLOW_PROTOCOL="file")
-            subprocess.run([sys.executable, "-I", TOOLS / "sources.py", "--cache", cache], env=env, check=True)
-            self.assertFalse((cache / "linux").exists())
+class CaptureTests(unittest.TestCase):
+    def setUp(self):
+        temp = tempfile.TemporaryDirectory(prefix="test capture ")
+        self.addCleanup(temp.cleanup)
+        self.root = Path(temp.name)
+        self.linux = self.root / "linux"
+        self.drivers = self.linux / "drivers"
+        self.drivers.mkdir(parents=True)
+        (self.drivers / "Kbuild").write_text("obj-$(CONFIG_FOO) += foo.o\nobj-$(CONFIG_BAR) += bar.o\n")
+        for name in ("foo.c", "bar.c"):
+            (self.drivers / name).touch()
+        self.base = self.root / "board.config"
+        self.base.write_text('CONFIG_MODULES=y\nCONFIG_TRACEPOINTS=y\nCONFIG_BAR=m\nCONFIG_FOO=y\nCONFIG_NAME="board"\n')
+        self.campaign = self.root / "campaign"
+        self.cc = self.root / "test compiler"
+        self.cc.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
+        self.cc.chmod(0o755)
+        self.plugin = self.root / "frontend.so"
+        self.obj = self.root / "kernel"
+        (self.obj / "include/config").mkdir(parents=True)
+        (self.obj / "include/config/kernel.release").write_text("test-profile\n")
+        self.nm = self.root / "test nm"
+        self.nm.write_text('''#!/bin/sh
+[ "$1" = --undefined-only ] || exit 1
+IFS= read -r symbol < "$2" && printf ' U %s\\n' "$symbol"
+''')
+        self.nm.chmod(0o755)
+        self.plan = self.root / "plan"
+        self.actual = self.root / "normalized.config"
 
-    @unittest.skipUnless(shutil.which("git"), "cloning requires Git")
-    def test_ref_selects_new_clone_but_preserves_dirty_and_archived_trees(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            origin, cache = root / "origin", root / "cache"
-            origin.mkdir()
-            (cache / "ftxui").mkdir(parents=True)
-            (cache / "ftxui/CMakeLists.txt").touch()
-            gitconfig = root / "gitconfig"
-            gitconfig.write_text('[user]\nname = Test\nemail = test@example.invalid\n'
-                                 f'[url "{origin.as_uri()}"]\ninsteadOf = https://github.com/torvalds/linux.git\n'
-                                 'insteadOf = https://github.com/llvm/llvm-project.git\n')
-            env = {k: v for k, v in os.environ.items() if not k.startswith("GIT_") and k != "LINUX"}
-            env.update(GIT_CONFIG_GLOBAL=str(gitconfig), GIT_CONFIG_NOSYSTEM="1", GIT_ALLOW_PROTOCOL="file", LLVM_REF="board")
+    def call(self, action, *args, check=True):
+        return subprocess.run([sys.executable, "-I", CAPTURE, action, "--linux", self.linux, "--campaign", self.campaign,
+                               *args], text=True, capture_output=True, check=check)
 
-            def run(*args):
-                subprocess.run(args, cwd=origin, check=True, env=env)
+    def prepare(self, *options, check=True):
+        return self.call("prepare", "--cc", self.cc, "--plugin", self.plugin, "--config", self.base, *options, check=check)
 
-            run("git", "init", "-q", "-b", "upstream")
-            (origin / "Makefile").write_text("board\n")
-            (origin / "llvm").mkdir()
-            (origin / "llvm/CMakeLists.txt").touch()
-            run("git", "add", "Makefile", "llvm/CMakeLists.txt")
-            run("git", "commit", "-qm", "board")
-            run("git", "branch", "board")
-            (origin / "Makefile").write_text("upstream\n")
-            run("git", "commit", "-qam", "upstream")
-            fetch = (sys.executable, "-I", TOOLS / "sources.py", "--cache", cache, "--llvm-source", "--linux-ref")
-            run(*fetch, "board")
-            self.assertEqual((cache / "llvm-project/Makefile").read_text(), "board\n")
-            tree = cache / "linux"
-            self.assertEqual((tree / "Makefile").read_text(), "board\n")
-            (tree / "Makefile").write_text("vendor edits\n")
-            run(*fetch, "nonexistent-ref")
-            self.assertEqual((tree / "Makefile").read_text(), "vendor edits\n")
-            (tree / ".git").rename(root / "metadata")
-            run(*fetch, "nonexistent-ref")
-            self.assertEqual((tree / "Makefile").read_text(), "vendor edits\n")
+    def coverage(self):
+        return self.call("coverage", "--obj", self.obj, "--nm", self.nm, "--arch", "riscv")
 
+    def candidate(self, *, arch="riscv", check=True):
+        return self.call("candidate", "--plan", self.plan, "--config", self.actual, "--arch", arch, check=check)
 
-class BuilderTests(unittest.TestCase):
-    def test_toolchain_uses_selected_compiler_and_untagged_kernel(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            (root / "Makefile").write_text("kernelversion:\n\t@printf '%s\\n' 6.12-board\n")
-            sdk = root / "sdk"
-            (sdk / "bin").mkdir(parents=True)
-            clang = sdk / "bin/clang"
-            clang.write_text("#!/bin/sh\nprintf '%s\\n' 'clang version 23.1.5'\n")
-            clang.chmod(0o755)
-            args = SimpleNamespace(linux=root, llvm=sdk, cc=None, arch="riscv", jobs=1,
-                                   hostcc=None, hostcxx=None, host_sysroot=None)
-            kit = BUILD["Toolchain"](args)
-            self.assertEqual(kit.cc, str(clang))
-            self.assertEqual(kit.kernel_version(), "6.12-board")
-            args.cc = str(sdk / "bin/missing")
-            with self.assertRaisesRegex(ValueError, "Clang not found"):
-                BUILD["Toolchain"](args)
-            args.cc, args.llvm = None, root / "empty-sdk"
-            with patch.dict(os.environ, PATH=str(clang.parent)), self.assertRaisesRegex(ValueError, "Clang not found"):
-                BUILD["Toolchain"](args)
+    def compiled(self, filename, *, owner, symbol="another_probe"):
+        target = self.obj / filename
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(symbol + "\n")
+        target.with_name(f".{target.name}.cmd").write_text(f'''savedcmd := clang '-DKBUILD_MODNAME="{owner}"' -c unit.c\n''')
 
-    def test_kconfig_coercion_is_not_accepted(self):
-        compare = BUILD["same_config"]
-        compare({"CONFIG_A": "n"}, {}, "normalization")
-        for wanted, got in (({"CONFIG_A": "m"}, {"CONFIG_A": "y"}), ({}, {"CONFIG_UNRELATED": "y"})):
-            with self.assertRaisesRegex(ValueError, "normalization"):
-                compare(wanted, got, "normalization")
+    def test_prepare_default_observes_without_authorizing_changes(self):
+        self.prepare()
+        self.assertEqual((self.campaign / "scope.tsv").read_text().splitlines()[1:],
+                         ["1\tCONFIG_BAR\tbar\tkeep\tdrivers/bar.c", "2\tCONFIG_FOO\tfoo\tkeep\tdrivers/foo.c"])
+        self.assertEqual((self.campaign / "baseline.config").read_bytes(), self.base.read_bytes())
+        self.assertIn("#define KCFG_COUNT 2\n", (self.campaign / "bridge-config.h").read_text())
+        key = DATA["read_campaign_id"](self.campaign)
+        name = DATA["probe_symbol"](key)
+        self.assertIn(f'#define KCFG_LINK_NAME "{name}"\n', (self.campaign / "bridge-config.h").read_text())
+        self.assertLessEqual(len(name), 55)
 
-    def test_discovery_only_suggests_literal_unconditional_bindings(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            (root / "Makefile").write_text("obj-$(CONFIG_A) += first.o \\\n second.o\n"
-                                          "ifneq ($(ARCH),x86)\nobj-$(CONFIG_B) += other.o\nendif\n")
-            for stem in ("first", "second", "other"):
-                (root / (stem + ".c")).touch()
-            self.assertEqual(BUILD["literal_bindings"](root),
-                             {root / "first.c": {"CONFIG_A"}, root / "second.c": {"CONFIG_A"}})
+    def test_requires_profile_settings_and_unambiguous_policy(self):
+        for opts in (("--drop", "CONFIG_MISSING"), ("--defer", "CONFIG_FOO", "--drop", "CONFIG_FOO")):
+            with self.subTest(opts=opts):
+                self.assertNotEqual(self.prepare(*opts, check=False).returncode, 0)
+                self.assertFalse(self.campaign.exists())
+        self.base.write_text("CONFIG_MODULES=y\n")
+        error = self.prepare(check=False)
+        self.assertIn("CONFIG_TRACEPOINTS=y", error.stderr)
+        self.assertFalse(self.campaign.exists())
 
-    def test_compiler_selects_exactly_the_mapped_target(self):
-        with tempfile.TemporaryDirectory() as temp:
-            p = Path(temp)
-            compiler = p / "compiler"
-            compiler.write_text('#!/bin/sh\nprintf "%s\\n" "$@"\n')
-            compiler.chmod(0o755)
-            kit = SimpleNamespace(linux=p / "linux", cc=compiler)
-            rows = {1: ("CONFIG_FOO", "foo", "keep", "drivers/foo.c")}
-            wrapper = BUILD["compiler_wrapper"](kit, p, p / "plugin.so", rows)
+    def test_discovery_handles_continuations_and_ignores_conditional_rules(self):
+        (self.drivers / "Kbuild").write_text("obj-$(CONFIG_FOO) += first.o \\\n second.o\n"
+                                            "ifneq ($(ARCH),x86)\nobj-$(CONFIG_FOO) += other.o\nendif\n")
+        for name in ("first.c", "second.c", "other.c"):
+            (self.drivers / name).touch()
+        self.assertIn("no unique module", self.prepare("--defer", "CONFIG_FOO", check=False).stderr)
+        self.prepare("--drop", "CONFIG_FOO")
+        self.assertEqual((self.campaign / "scope.tsv").read_text().splitlines()[1:],
+                         ["1\tCONFIG_FOO\t-\tdrop\tdrivers/first.c", "2\tCONFIG_FOO\t-\tdrop\tdrivers/second.c"])
 
-            def invoke(name):
-                return subprocess.check_output([wrapper, "-c", "-o", "unit.o", kit.linux / name], text=True).splitlines()
+    def test_explicit_scope_and_compiler_receipts_follow_only_mapped_object_compiles(self):
+        scope = self.root / "scope.tsv"
+        scope.write_text("# fixture\n1\tCONFIG_FOO\tfoo\tdefer\tdrivers/foo.c\n")
+        self.assertIn("choose a scope file", self.prepare("--scope", scope, "--drop", "CONFIG_BAR", check=False).stderr)
+        self.prepare("--scope", scope)
+        self.assertEqual((self.campaign / "scope.tsv").read_bytes(), scope.read_bytes())
+        wrapper = self.campaign / "clang"
+        def invoke(src, *args):
+            return subprocess.check_output([wrapper, *args, self.linux / src], text=True).splitlines()
+        selected = invoke("drivers/foo.c", "-c", "-o", "foo.o")
+        self.assertIn("-fplugin-arg-kcfgtrace-id=1", selected)
+        self.assertIn(f"-fplugin-arg-kcfgtrace-receipt={self.campaign}/receipts/1", selected)
+        self.assertIn(f"-fplugin={self.plugin}", selected)
+        for args in (("drivers/other/foo.c", "-c", "-o", "foo.o"), ("drivers/foo.c", "-E"),
+                     ("drivers/foo.c", "-S", "-o", "foo.s")):
+            self.assertFalse(any(arg.startswith("-fplugin") for arg in invoke(*args)))
+        self.assertTrue(invoke("init/init_task.c", "-E")[-1].endswith("/driver/bridge.c"))
 
-            self.assertIn("-fplugin-arg-kcfgtrace-id=1", invoke("drivers/foo.c"))
-            self.assertFalse(any(a.startswith("-fplugin") for a in invoke("drivers/other/foo.c")))
-            self.assertTrue(invoke("init/init_task.c")[-1].endswith("/driver/bridge.c"))
+    def test_bad_campaign_ids_do_not_name_probes(self):
+        self.campaign.mkdir()
+        key = b"0a" * 32
+        for raw in (key, key + b"\r\n", key.upper() + b"\n", key[1:] + b"\n"):
+            with self.subTest(raw=raw):
+                (self.campaign / "campaign.id").write_bytes(raw)
+                with self.assertRaisesRegex(ValueError, "campaign.id"):
+                    DATA["read_campaign_id"](self.campaign)
 
-    def test_capture_identifier_has_one_wire_format(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            key = b"0a" * 32
-            path = root / "campaign.id"
-            path.write_bytes(key + b"\n")
-            self.assertEqual(BUILD["read_campaign_id"](root), key.decode())
-            for invalid in (key, key + b"\r\n", key.upper() + b"\n", key[1:] + b"\n"):
-                with self.subTest(invalid=invalid):
-                    path.write_bytes(invalid)
-                    with self.assertRaisesRegex(ValueError, "invalid campaign.id"):
-                        BUILD["read_campaign_id"](root)
+    def test_coverage_needs_compiler_receipt_probe_reference_and_single_owner(self):
+        self.prepare("--drop", "CONFIG_FOO", "--defer", "CONFIG_BAR")
+        probe = DATA["probe_symbol"](DATA["read_campaign_id"](self.campaign))
+        self.compiled("drivers/bar.o", owner="bar", symbol=probe)
+        self.compiled("drivers/foo.o", owner="foo")
+        (self.campaign / "receipts/2").write_text("8\n")
+        self.coverage()
+        self.assertEqual((self.campaign / "coverage.tsv").read_text(), "1\t0\n2\t0\n")
+        (self.campaign / "receipts/1").write_text("3\n")
+        self.compiled("drivers/foo.o", owner="foo:another", symbol=probe)
+        self.coverage()
+        self.assertEqual((self.campaign / "coverage.tsv").read_text(), "1\t3\n2\t0\n")
+        self.compiled("drivers/foo.o", owner="foo", symbol=probe)
+        self.coverage()
+        self.assertEqual((self.campaign / "coverage.tsv").read_text(), "1\t3\n2\t8\n")
+        self.assertIn("2\tdrivers/foo.c\tfoo\t8", (self.campaign / "objects.tsv").read_text())
+        self.assertEqual(json.loads((self.campaign / "build.json").read_text())["release"], "test-profile")
 
-    def test_candidate_rejects_mixed_capture_or_target_before_build(self):
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            campaign, plan = root / "campaign", root / "plan"
-            campaign.mkdir()
-            plan.mkdir()
-            (root / "drivers").mkdir()
-            (root / "drivers/board.c").touch()
-            (campaign / "scope.tsv").write_text("1\tCONFIG_BOARD\tboard\tkeep\tdrivers/board.c\n")
-            key, other = "a" * 64, "b" * 64
-            (campaign / "campaign.id").write_text(key + "\n")
-            args = SimpleNamespace(campaign=campaign, plan=plan, out=root / "candidate")
-            kit = SimpleNamespace(linux=root, arch="riscv", kernel_version=lambda: "6.12-board")
-            cases = ((other, key, "riscv", "6.12-board", "mismatched campaign"),
-                     (key, other, "riscv", "6.12-board", "different capture campaign"),
-                     (key, key, "arm64", "6.12-board", "architecture changed"),
-                     (key, key, "riscv", "6.11-board", "kernel version changed"))
-            for build_id, plan_id, arch, version, error in cases:
-                with self.subTest(error=error):
-                    build = {"id": build_id, "arch": arch, "kernel_version": version}
-                    (campaign / "build.json").write_text(json.dumps(build))
-                    (plan / "campaign.id").write_text(plan_id + "\n")
-                    with self.assertRaisesRegex(ValueError, error):
-                        BUILD["candidate"](args, kit)
-                    self.assertFalse(args.out.exists())
+    def test_omitted_members_by_kbuild_module_or_config_disqualify_a_symbol(self):
+        self.prepare("--drop", "CONFIG_FOO")
+        probe = DATA["probe_symbol"](DATA["read_campaign_id"](self.campaign))
+        self.compiled("drivers/foo.o", owner="foo", symbol=probe)
+        (self.campaign / "receipts/1").write_text("1\n")
+        self.compiled("drivers/missing.o", owner="foo:shared")
+        self.assertIn("drivers/missing.o", self.coverage().stderr)
+        self.assertEqual((self.campaign / "coverage.tsv").read_text(), "1\t0\n")
+        (self.obj / "drivers/.missing.o.cmd").unlink()
+        (self.drivers / "vendor").mkdir()
+        (self.drivers / "vendor/Kbuild").write_text("obj-$(CONFIG_FOO) += also.o\n")
+        (self.drivers / "vendor/also.c").touch()
+        self.compiled("drivers/vendor/also.o", owner="also")
+        self.assertIn("drivers/vendor/also.o", self.coverage().stderr)
+        self.assertEqual((self.campaign / "coverage.tsv").read_text(), "1\t0\n")
 
-    def test_changes_require_policy_and_a_verified_object(self):
-        rows = {1: ("CONFIG_FOO", "foo", "drop", "drivers/foo.c")}
-        with tempfile.TemporaryDirectory() as temp:
-            root = Path(temp)
-            (root / "baseline.config").write_text("CONFIG_FOO=y\nCONFIG_BAR=y\n")
-            (root / "coverage.tsv").write_text("1\t0\n")
-            (root / "changes.tsv").write_text("CONFIG_FOO\ty\tn\n")
-            (root / "requested.config").write_text("# CONFIG_FOO is not set\nCONFIG_BAR=y\n")
-            with self.assertRaisesRegex(ValueError, "unauthorized"):
-                BUILD["requested_values"](root, root, rows)
-            (root / "coverage.tsv").write_text("1\t1\n")
-            self.assertEqual(BUILD["requested_values"](root, root, rows)["CONFIG_FOO"], "n")
-            (root / "requested.config").write_text("# CONFIG_FOO is not set\n# CONFIG_BAR is not set\n")
-            with self.assertRaisesRegex(ValueError, "approved changes"):
-                BUILD["requested_values"](root, root, rows)
+    def reviewed(self):
+        self.prepare("--drop", "CONFIG_BAR", "--defer", "CONFIG_FOO")
+        probe = DATA["probe_symbol"](DATA["read_campaign_id"](self.campaign))
+        for i, name in enumerate(("bar", "foo"), 1):
+            self.compiled(f"drivers/{name}.o", owner=name, symbol=probe)
+            (self.campaign / "receipts" / str(i)).write_text("1\n")
+        self.coverage()
+        self.plan.mkdir()
+        shutil.copyfile(self.campaign / "campaign.id", self.plan / "campaign.id")
+        (self.plan / "changes.tsv").write_text("CONFIG_BAR\tm\tn\nCONFIG_FOO\ty\tm\n")
+        (self.plan / "modules-load.late").write_text("foo\n")
+        self.actual.write_text(self.base.read_text().replace("CONFIG_BAR=m\n", "").replace("CONFIG_FOO=y", "CONFIG_FOO=m"))
 
-    def test_unlisted_compiled_sibling_blocks_the_entire_option(self):
-        with tempfile.TemporaryDirectory() as temp:
-            obj = Path(temp)
-            (obj / "drivers").mkdir()
-            cmd = "savedcmd := clang -DKBUILD_MODNAME='\"combined\"' -c file.c\n"
-            (obj / "drivers/.first.o.cmd").write_text(cmd)
-            (obj / "drivers/.second.o.cmd").write_text(cmd)
-            rows = {1: ("CONFIG_COMBINED", "combined", "drop", "drivers/first.c")}
-            self.assertIn("CONFIG_COMBINED", BUILD["omitted_members"](obj, rows))
-            rows[2] = ("CONFIG_COMBINED", "combined", "drop", "drivers/second.c")
-            self.assertEqual(BUILD["omitted_members"](obj, rows), {})
+    def test_normalized_candidate_matches_reviewed_changes_and_only_those_changes(self):
+        self.reviewed()
+        self.candidate()
+        self.actual.write_text(self.actual.read_text().replace('"board"', '"other"'))
+        self.assertIn("CONFIG_NAME", self.candidate(check=False).stderr)
 
-    def test_kbuild_shared_or_absent_owner_is_unknown(self):
-        with tempfile.TemporaryDirectory() as temp:
-            obj = Path(temp) / "common.o"
-            cmd = Path(temp) / ".common.o.cmd"
-            self.assertIsNone(BUILD["object_owner"](obj))
-            cmd.write_text('savedcmd := cc \'-DKBUILD_MODNAME="foo:bar"\' -c common.c\n')
-            self.assertIsNone(BUILD["object_owner"](obj))
-            cmd.write_text('savedcmd := cc \'-DKBUILD_MODNAME="foo"\' -c common.c\n')
-            self.assertEqual(BUILD["object_owner"](obj), "foo")
+    def test_candidate_preserves_capture_attribution_and_board_policy(self):
+        self.reviewed()
+        self.assertIn("target architecture", self.candidate(arch="arm64", check=False).stderr)
+        (self.plan / "campaign.id").write_text("0" * 64 + "\n")
+        self.assertIn("different capture", self.candidate(check=False).stderr)
+        shutil.copyfile(self.campaign / "campaign.id", self.plan / "campaign.id")
+        (self.campaign / "coverage.tsv").write_text("1\t1\n")
+        self.assertIn("unauthorized configuration change: CONFIG_FOO", self.candidate(check=False).stderr)
+        (self.plan / "changes.tsv").write_text("CONFIG_BAR\tm\tn\nCONFIG_NAME\ty\tn\n")
+        self.assertIn("unauthorized configuration change: CONFIG_NAME", self.candidate(check=False).stderr)
+
+    def test_candidate_requires_the_reviewed_deferred_modules(self):
+        self.reviewed()
+        for late in ("", "other\n", "foo\nfoo\n", "foo\nother\n"):
+            with self.subTest(late=late):
+                (self.plan / "modules-load.late").write_text(late)
+                self.assertIn("invalid deferred-module list", self.candidate(check=False).stderr)
 
 
 if __name__ == "__main__":

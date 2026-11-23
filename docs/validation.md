@@ -1,68 +1,55 @@
-# 参考平台验收记录
+# 内核裁剪回归测试
 
-参考平台为 x86_64 QEMU、Ubuntu Base 24.04.4、Linux 7.4-rc3 和 LLVM／Clang／LLD 23.1.4。负载检查 `/proc/config.gz` 可读、压缩内容完整且解压后含 `CONFIG_IKCONFIG_PROC=y`。
-
-## 四次启动的结果
-
-| 启动方式 | 负载结果 |
-|---|---|
-| 未插桩板级基线 | 通过。 |
-| 采集内核与采集驱动 | 通过，完整快照传回宿主机。 |
-| 候选内核，就绪后加载配置读取模块 | 通过。 |
-| 同一候选，省略配置读取模块 | 启动到就绪，负载因接口缺失而失败。 |
-
-| 配置项 | 启动命中 | 负载命中 | 结果 |
-|---|---|---|---|
-| `CONFIG_BINFMT_ELF` | 有 | 有 | 保留内建。 |
-| `CONFIG_IKCONFIG` | 无 | 有 | 改为模块 `configs.ko`。 |
-| `CONFIG_NLS_CODEPAGE_850` | 无 | 无 | 按板级策略关闭。 |
-
-压缩内核镜像从 3,195,904 字节降至 3,179,520 字节，减少 16,384 字节（0.513%）。该口径只计镜像，不计独立模块。对照结果说明，参考负载需要配置读取功能，启动到就绪不需要它。
-
-同一套四次启动还使用无 Git 元数据的 Linux 7.3.5 发布源码和系统 LLVM 23.1.5 复测：基线、采集版和候选均通过，省略延迟模块时负载按预期失败。
-
-## 采集和拒绝路径
-
-| 检查 | 结果 |
-|---|---|
-| 负载期间加载初始化测试模块 | 初始化回调睡眠后触发探针，仅初始化位置位。 |
-| 设备状态 | 重复开始、非法命令和停止前读取均被拒绝；随后可正常结束并读取快照。 |
-| 同构建多快照 | 配置读取与普通文件读写的快照可合并，并通过候选构建。 |
-| Kconfig 连带变更 | 请求关闭父项导致 `olddefconfig` 关闭 `CONFIG_IKCONFIG_PROC`，候选构建拒绝发布。 |
-| 带基本符号版本的模块 | 插桩的 `configs.ko` 就绪后加载，读取配置时记录到负载命中；不同发行后缀的模块在插入前被拒绝。 |
-| 处理器交互与输入校验 | 通过保存、取消、身份校验、截断检测、覆盖检查和输出目录保护。 |
+实板用自己的配置和负载验收。维护者用 x86_64 QEMU 回归测试回答两个问题：处理器能否区分启动与负载的使用情况？按建议裁剪后，同一负载还能否通过？
 
 ## 复现
 
+在仓库根目录用自己的 `.env` 完成 `./kcfg --build-tools`，再运行：
+
 ```sh
 just check
-JOBS=8 just demo build/replay-01
-tests/check-initializer.sh build/replay-01/profile build/replay-01/initializer-check
-uv run --no-project python -I processor/tests/contract.py build/host/processor/kcfg-plan --tmux
+just replay build/replay-01
 ```
 
-在实验目录查阅 `result.json`、`plan/report.tsv`、`capture/trace.tsv` 和各次启动的 `guest.status`。最终配置位于 `candidate/.config`。
+第一条命令运行现有宿主构建中的组件测试。第二条命令在新目录中建立适合 Ubuntu 客体的小型配置，调用公开入口构建三版内核并运行四次启动。额外软件和离线运行方法见 [QEMU 测试说明](../qemu/README.md)。
 
-独立复现使用基本符号版本的模块：
+| 启动 | 负载与判定 |
+|---|---|
+| 基线 | 就绪后读取 `/proc/config.gz`，解压并检查配置内容。 |
+| 采集 | 用相同负载生成快照；处理器应提出两项变更。 |
+| 候选 | 就绪后加载 `configs.ko`，负载应通过。 |
+| 对照 | 启动同一候选内核，省略该模块；客体应到达就绪，随后在负载阶段失败。 |
+
+实验目录中的 `guests/profile/trace.tsv` 是实际采集的输入，`plan/report.tsv` 解释变更，`candidate/.config` 是候选内核的配置。每次启动各有一份 `guest.status` 和 `console.log`。
+
+要单独测试初始化归因，可在同一次回归后运行：
 
 ```sh
-SDK="${SDK:-$PWD/.deps/llvm}"
-tools/kernel.py configure --llvm "$SDK" --base allnoconfig --fragment qemu/guest.config \
-  --fragment examples/profile.config --fragment tests/basic-versions.config --out build/versions-board
-tools/kernel.py configure --llvm "$SDK" --base allmodconfig --fragment build/versions-board/.config \
-  --unpin CONFIG_IKCONFIG --out build/versions-baseline
-tools/kernel.py profile --llvm "$SDK" --baseline build/versions-baseline/.config \
-  --scope examples/qemu.scope.tsv --plugin build/host/plugin/kcfg_frontend.so --out build/versions-profile
-qemu/guest.py run --mode profile --kernel build/versions-profile/kernel/arch/x86/boot/bzImage \
-  --module build/versions-profile/driver/kcfg_collect.ko \
-  --late-module build/versions-profile/kernel/kernel/configs.ko \
-  --workload examples/workload.sh --output build/versions-guest
+tests/check-initializer.sh build/replay-01 build/replay-01/init-test
 ```
 
-## 适用范围
+这个测试在采集窗口内加载测试模块。初始化回调睡眠后调用普通函数，预期该函数的探针只命中初始化位。
 
-以上 QEMU 结果使用精简的参考板级基线；示例中带约束的 `allyesconfig` 生成了相同的 `.config`。另一次实验从原生 `allyesconfig` 出发，调整后的宽基线已构建，客体启动尚未通过。
+## 新入口的实测范围
 
-## RISC-V 脚本验证
+- **x86_64 原生配置**：用 Linux 7.4-rc3 实际运行 `allyesconfig`。原件已启用模块和跟踪点；关闭 `CONFIG_TRIM_UNUSED_KSYMS` 后运行 `olddefconfig`。这次全选实验止于配置生成。
+- **x86_64 编译与运行**：另用精简配置、LLVM 23.1.4 和 Ubuntu Base 24.04.4，通过新入口生成三份部署包。基线、采集和加载 `configs.ko` 的候选均通过负载；省略模块的对照在负载阶段失败。单独运行的初始化测试也通过。
+- **riscv64 交叉构建**：精简配置的基线、采集和候选均已构建并打包。采集包包含 `Image`、设备树和树外控制模块；候选输入使用模拟快照，包中包含延迟模块 `configs.ko`。
+- **板端安装**：在隔离的启动目录和模块目录中运行包内 `deploy.sh`，测试安装路径及创建、更新 initramfs 和更新 GRUB 的调用顺序。实板启动和负载需按[实板教程](board.md)验证。
 
-在 x86_64 上用 `./kcfg config` 生成了 riscv64 原生全选配置和采集所需的差异。另用精简配置交叉构建并打包了三版内核：实际归档中的 `Image` 和设备树与构建产物一致，采集包包含匹配的签名驱动。用模拟快照生成的候选包包含延迟模块 `configs.ko`。板端安装脚本在隔离文件系统中测试；实板换核、负载和启动计时按[实板操作流程](riscv64-board.md)执行。
+## 原生 defconfig 下的 SQLite 负载
+
+基线用 Linux 7.4-rc3 的 x86_64 `defconfig` 直接生成。无网卡的 QEMU/KVM 客体中，候选内核关闭了 14 个允许移除的硬件选项中的 13 个；其余 1 个因插桩覆盖不足而保留。
+
+两版未插桩内核各预热 1 次，再按交替顺序冷启动 20 对。客户机挂载 ext4 业务盘后记录就绪时间，再运行 SQLite 3.45.1。全部 40 次均通过 10 万笔订单的并发读隔离、营收和备份校验。
+
+| 指标 | 原生基线 | 裁剪后 | 缩减率 |
+|---|---|---|---|
+| 压缩部署包（字节） | 15,147,635 | 14,983,204 | 1.09% |
+| 内核启动至业务盘就绪的中位耗时（毫秒） | 567.80 | 566.98 | 0.14% |
+
+部署包计入内核镜像和模块，initramfs 在目标机生成。启动耗时缩减率的 95% 分块重采样区间为 −1.16% 至 1.42%，未见稳定提速。
+
+## 历史测量
+
+此前同一 x86_64 参考负载的压缩内核镜像从 3,195,904 字节降至 3,179,520 字节，减少 16,384 字节（0.513%）。这个数字来自精简的测试基线，仅计镜像。另一组四次启动使用 Linux 7.3.5 发布源码和系统 LLVM 23.1.5，得到相同的负载结果。

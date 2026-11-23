@@ -1,41 +1,18 @@
-# Clang 函数入口插件
+# Clang 前端插桩
 
-插件按翻译单元插桩。编译包装器为每个入选的 C 文件分配一个编号，插件在该文件的普通函数入口插入探针调用。同一文件内的探针共用编号，板级清单据此关联配置项和模块。
+在仓库根目录复制 `.env.example` 为 `.env`，运行 `./kcfg --init-deps` 和 `./kcfg --build-tools`。插件生成在 `$HOST_BUILD/plugin/kcfg_frontend.so`。用与目标内核编译器兼容的 Clang 开发库构建插件；主机工具链由 `.env` 的 `LLVM_PREFIX`、`TOOLS_CXX` 和 `SYSROOT` 选择。
 
-插件在代码生成前修改函数体，沿用原函数的声明和链接属性。强制包含的头文件声明探针，声明上的汇编名将其绑定到本次采集构建的内建记录端。
+## 插入哪些调用
 
-## 插桩规则
+`./kcfg --build-kernel profile` 依据清单给每个入选的 C 文件分配一个编号。插件在该文件的普通函数入口插入探针；同一文件的所有探针共用编号。调用目标是内建记录端，本次构建的符号名由强制包含的头文件声明。
 
-| 项目 | 处理 |
+| 定义位置或类型 | 行为 |
 |---|---|
-| 主文件普通函数 | 函数名的拼写和展开位置均在主文件时插桩。 |
+| 主文件中的普通函数 | 函数名的拼写和展开位置均在主文件时插桩。 |
 | 头文件定义、显式内联函数 | 跳过。优化器仍可内联已插桩的普通函数。 |
-| 特殊函数 | 跳过显式段（含初始化、退出段）、`notrace`、`noinstr`、裸函数、中断入口、特殊调用约定、冷热路径标注和限制副作用的定义。 |
-| 同步初始化链 | 普通辅助函数照常插桩，由[内建记录端](../docs/architecture.md#时间窗口)区分初始化和负载命中。 |
-
-## 独立构建
-
-从仓库根目录运行。用加载插件的 Clang 所属 SDK 编译插件。23.1.4 是参考版本；可通过 `LLVM_DIR` 和 `Clang_DIR` 选择其他兼容的安装。自选宿主编译器和 glibc 时使用 `CMAKE_CXX_COMPILER` 和完整 `CMAKE_SYSROOT`，并保持与 Clang 的 C++ ABI 兼容。
-
-```sh
-SDK="${SDK:-$PWD/.deps/llvm}"
-export PATH="$SDK/bin:$PATH" LD_LIBRARY_PATH="$SDK/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
-cmake -S . -B build/plugin-only -G Ninja -DKCFG_BUILD_PROCESSOR=OFF \
-  -DCMAKE_C_COMPILER="$SDK/bin/clang" -DCMAKE_CXX_COMPILER="$SDK/bin/clang++" \
-  -DLLVM_DIR="$SDK/lib/cmake/llvm" -DClang_DIR="$SDK/lib/cmake/clang"
-cmake --build build/plugin-only --target kcfg_frontend
-ctest --test-dir build/plugin-only -R frontend-instrumentation --output-on-failure
-```
+| 特殊函数 | 跳过显式段、`notrace`、`noinstr`、裸函数、中断入口、特殊调用约定、冷热路径标注和限制副作用的定义。 |
+| 初始化回调同步调用的普通函数 | 照常插桩，由[记录端的时间窗口](../docs/architecture.md#时间窗口)区分执行来源。 |
 
 ## 编译接口
 
-每次传入一个未预处理的 C 文件。参数 `id` 取 1 至 65,535，`receipt` 指定收据路径。手动验证时，准备自己的 `example.c`，并使用新的收据和对象路径。
-
-```sh
-"$SDK/bin/clang" -fplugin="$PWD/build/plugin-only/plugin/kcfg_frontend.so" \
-  -fplugin-arg-kcfgtrace-id=1 -fplugin-arg-kcfgtrace-receipt="$PWD/example.count" \
-  -include "$PWD/driver/probe.h" '-DKCFG_LINK_NAME="kcfg_hit_example"' \
-  -c example.c -o example.o
-```
-
-成功收据是十进制插入点数加换行。编译失败时，Clang 丢弃新的临时收据。覆盖校验还要求生成的对象引用探针符号，以确认优化后至少保留了一个观测点。
+一次处理一个未预处理的 C 文件。`id` 是 1 到 65,535 的编号；`receipt` 是记录插入点数的路径。生成代码成功后才发布收据。主机结合收据、对象中的探针引用和 Kbuild 归属判定该文件是否有有效覆盖。
