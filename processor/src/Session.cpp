@@ -20,7 +20,7 @@ struct ManualEdit {
 Result<void> checkSetting(DependencyGraph const &graph, std::string const &name, Setting value) {
     auto const type = graph.symbols().find(name);
     if (type == graph.symbols().end()) return std::unexpected{name + ": not a declared boolean or tristate option"};
-    if (value == Setting::module and not type->second) return std::unexpected{name + ": boolean option cannot be m"};
+    if (value == Setting::module and not type->second.tristate) return std::unexpected{name + ": boolean option cannot be m"};
     if (value != Setting::module and value != Setting::yes and value != Setting::no)
         return std::unexpected{name + ": expected y, m or n"};
     return {};
@@ -29,7 +29,7 @@ Result<void> checkSetting(DependencyGraph const &graph, std::string const &name,
 Result<std::vector<Row>> makeRows(Campaign const &campaign, std::span<Hits const> hits, DependencyGraph const &graph) {
     if (hits.size() != campaign.units.size()) return std::unexpected{"trace and scope sizes differ"};
     std::map<std::string, Row> indexed;
-    for (auto const &[name, tristate] : graph.symbols()) {
+    for (auto const &[name, _] : graph.symbols()) {
         auto &row = indexed[name];
         row.before = Setting::no; // A switch omitted from .config has effective value n.
         row.editable = true;
@@ -177,7 +177,7 @@ private:
             for (auto &row : table) {
                 if (not row.policy or row.authority != Authority::baseline) continue;
                 auto const type = graph.symbols().find(row.symbol);
-                auto const decision = automaticChoice(row, enabled, type != graph.symbols().end() and type->second);
+                auto const decision = automaticChoice(row, enabled, type == graph.symbols().end() ? Switch{} : type->second);
                 row.reason = decision.reason;
                 if (not decision.late and decision.value == row.before) continue;
                 row.current = decision.value;

@@ -25,7 +25,7 @@ ${EDITOR:-vi} .env
 首次实验先确定两件事：
 
 1. 用什么基线？`KERNEL_CONFIG=''` 表示原生 `allyesconfig` 加采集开关。已有能启动这块板的完整配置时，填写主机上的路径，例如 `KERNEL_CONFIG=/src/board.config`；脚本复制它并运行 `olddefconfig`。内核配置和镜像格式要能启动本板、挂载根盘并使用 initramfs。
-2. 哪些组件参与分析？默认观测自动发现的组件，覆盖完整且启动、负载均未命中的选项才参与关闭。要限定范围，将选项写入 `DROP=(...)` 或 `DEFER=(...)`。例如，允许推迟 `/proc/config.gz` 的读取模块可写 `DEFER=(CONFIG_IKCONFIG)`。板子必须保留的开关可以写入 `FORCE_CONFIG` 指向的文件。
+2. 哪些功能必须保留？采集范围由 Kbuild 自动发现。板子必须保留的开关写入 `FORCE_CONFIG` 指向的文件，例如 `CONFIG_EXT4_FS=y`。其余选项由编辑器根据启动和负载命中、插桩覆盖及配置依赖提出建议。
 
 其余项可保留默认值。已有源码或 LLVM 工具链时，在同一文件指定位置，见[脚本参考](usage.md)。
 

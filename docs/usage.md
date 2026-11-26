@@ -67,16 +67,13 @@ FTXUI_DIR=/opt/ftxui/lib/cmake/ftxui
 
 每个角色使用新的 `$WORK/<角色>/kernel/`。同一实验的基线、采集和候选共用 `WORK`；重做采集或更换源码时选择新的 `WORK`，以便原快照仍有对应的构建。只重试某个失败的角色时，先把它的角色目录移开。
 
-## 登记组件与处理快照
+## 自动发现组件与处理快照
 
-```bash
-DROP=(CONFIG_NLS_CODEPAGE_850)
-DEFER=(CONFIG_IKCONFIG)
-```
+采集构建从 Kbuild 自动发现能直接归属到开关的 C 文件，将编号与归属写入 `$WORK/profile/campaign/scope.tsv`。把它与同一次构建的快照一起保留。归属不明或覆盖不完整的选项保持原值。
 
-填写名单时，只观测列出的组件。`DROP` 允许关闭启动及负载都未命中的选项；`DEFER` 允许将启动未用的组件改为模块。两组均为空时，模板的 `INVENTORY_POLICY=drop` 让自动发现的组件参与分析，设为 `keep` 则只观测。已有采集清单保留其原策略。自动分析只使用覆盖完整的选项，且保留启动命中的原值。
+`INVENTORY_POLICY=auto` 是新采集的默认值。启动和负载都未命中时，建议关闭；仅在负载窗口命中且能确定对应的可加载模块时，建议在就绪后加载。`drop` 只建议关闭，`keep` 只观测。三种模式的观测范围相同。
 
-设置 `SCOPE=/data/scope.tsv` 会改用指定清单。其[五列示例](../examples/qemu.scope.tsv)依次是从 1 开始的编号、Kconfig 名、模块名或 `-`、策略和相对 C 文件路径，用制表符分隔。聚合或条件规则不能直接识别时，用这份清单说明实际归属。
+升级后，旧 `.env` 中的手工名单不再限制新采集；原有快照仍按各自清单中记录的策略处理。要使用自动发现的范围和新策略，请在新的 `WORK` 中重新采集。
 
 `TRACE` 是第一份快照，默认 `$WORK/trace.tsv`。其他启动取得的同构建快照可写成 `EXTRA_TRACES=(/data/second.tsv /data/third.tsv)`。`FORCE_CONFIG` 可指向每行一个 `CONFIG_名称=y/m/n` 赋值的文件。`DEPENDENCY_GRAPH` 可指定同一源码、架构和基线的解析器导出文件；留空时，主机通过 `uv` 运行外部解析器生成依赖图。
 

@@ -139,6 +139,7 @@ Result<Baseline> parseBaseline(Text const text) {
 }
 
 std::optional<Policy> policy(Text const value) {
+    if (value == "auto") return Policy::automatic;
     if (value == "keep") return Policy::keep;
     if (value == "drop") return Policy::drop;
     if (value == "defer") return Policy::defer;

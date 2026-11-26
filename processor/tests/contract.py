@@ -124,6 +124,32 @@ class Contract(unittest.TestCase):
             "CONFIG_PARTIAL\ty\ty\t0\t0\t0\t1\t2\tincomplete", self.result("report.tsv")
         )
 
+    def automatic_inventory(self):
+        scope = self.scope
+        for policy in ("keep", "drop", "defer"):
+            scope = scope.replace(f"\t{policy}\t", "\tauto\t")
+        (self.campaign / "scope.tsv").write_text(scope)
+
+    def test_automatic_policy_uses_ordinary_hits_across_all_units(self):
+        self.automatic_inventory()
+        self.trace.write_text(trace_for(CAMPAIGN_ID, HITS | {8: "0\t1\t0", 11: "0\t1\t0", 13: "0\t1\t0"}))
+        self.ok()
+        # Initialization alone permits neither a boot-use inference nor a late-load inference.
+        self.assertEqual(self.result("changes.tsv").splitlines(), [
+            "CONFIG_IDLE\ty\tn", "CONFIG_LATE\ty\tm", "CONFIG_USED\ty\tm",
+        ])
+        self.assertEqual(self.result("modules-load.late").splitlines(), ["already", "late-io", "used"])
+
+    def test_automatic_policy_respects_locks_dependencies_and_other_boots(self):
+        self.automatic_inventory()
+        graph = self.with_rules("select\tCONFIG_ALWAYS\tCONFIG_LATE\ty")
+        second = self.root / "second"
+        second.write_text(trace_for(CAMPAIGN_ID, {2: "1\t0\t0", 13: "0\t1\t0"}))
+        self.ok("--also", second, "--force", self.force("CONFIG_ALWAYS=y\n"), "--graph", graph)
+        self.assertEqual(self.result("changes.tsv").splitlines(), ["CONFIG_ALREADY\tm\tn", "CONFIG_IDLE\ty\tn"])
+        self.assertEqual(self.result("modules-load.late"), "")
+        self.assertIn("CONFIG_LATE\ty\ty\t0\t1\t0\t1\t1\tretained:", self.result("report.tsv"))
+
     def test_multiple_runs_conservative_union(self):
         second = self.root / "second"
         second.write_text(trace_for(CAMPAIGN_ID, {3: "0\t1\t0", 5: "1\t0\t0"}))

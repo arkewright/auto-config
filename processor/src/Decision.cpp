@@ -23,7 +23,7 @@ std::string_view settingText(Setting const value) {
     std::unreachable();
 }
 
-Proposal automaticChoice(Row const &row, bool const modulesEnabled, bool const tristate) {
+Proposal automaticChoice(Row const &row, bool const modulesEnabled, Switch const declaration) {
     auto keep = [&](std::string_view why) { return Proposal{row.before, why}; };
     auto const &e = row.evidence;
     if (not row.policy) return keep("outside observation scope");
@@ -33,13 +33,13 @@ Proposal automaticChoice(Row const &row, bool const modulesEnabled, bool const t
     if (not row.editable or (row.before != Setting::yes and row.before != Setting::module))
         return keep("baseline is not enabled or not tristate");
     if (e.hits.boot) return keep("used before workload");
-    if (row.policy == Policy::drop) {
-        if (e.hits.workload) return keep("workload used this symbol");
-        return {Setting::no, "drop permitted; no boot or workload hit"};
-    }
+    if (not declaration.visible) return keep("no visible Kconfig prompt in baseline");
+    if (row.policy != Policy::defer and not e.hits.workload)
+        return {Setting::no, "no boot or workload hit"};
+    if (row.policy == Policy::drop) return keep("workload used this symbol");
     if (not modulesEnabled) return keep("module support is not built in");
-    if (not tristate or row.module == "-") return keep("no audited loadable module");
-    return {Setting::module, "defer permitted; no pre-workload use", true};
+    if (not declaration.tristate or row.module == "-") return keep("no audited loadable module");
+    return {Setting::module, e.hits.workload ? "used only during workload" : "defer permitted; no pre-workload use", true};
 }
 
 Bundle materialize(Campaign const &campaign, std::span<Row const> const rows) {

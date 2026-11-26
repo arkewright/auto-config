@@ -13,9 +13,14 @@ struct Conflict {
     std::vector<std::string> symbols;
 };
 
+struct Switch {
+    bool tristate{};
+    bool visible{}; // Has a visible Kconfig prompt in the captured baseline.
+};
+
 struct DependencyGraph {
     virtual ~DependencyGraph() = default;
-    virtual std::map<std::string, bool> const &symbols() const = 0; // true for tristates
+    virtual std::map<std::string, Switch> const &symbols() const = 0;
     virtual std::vector<Conflict> conflicts(Values const &values) const = 0;
 };
 

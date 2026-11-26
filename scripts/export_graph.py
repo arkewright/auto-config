@@ -151,7 +151,8 @@ def records(tree):
     expr = Expressions(tree)
     switches = [s for s in tree.unique_defined_syms if s.orig_type in SWITCHES]
     for s in switches:
-        yield ("symbol", name(s), kc.TYPE_TO_STR[s.orig_type])
+        declaration = ("symbol", name(s), kc.TYPE_TO_STR[s.orig_type])
+        yield declaration if s.visibility else (*declaration, "hidden")
     if tree.modules.nodes:
         yield ("modules", name(tree.modules))
     absent = set()

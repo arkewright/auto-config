@@ -60,10 +60,10 @@ IFS= read -r symbol < "$2" && printf ' U %s\\n' "$symbol"
         target.write_text(symbol + "\n")
         target.with_name(f".{target.name}.cmd").write_text(f'''savedcmd := clang '-DKBUILD_MODNAME="{owner}"' -c unit.c\n''')
 
-    def test_prepare_default_observes_without_authorizing_changes(self):
+    def test_prepare_numbers_all_discovered_sources(self):
         self.prepare()
         self.assertEqual((self.campaign / "scope.tsv").read_text().splitlines()[1:],
-                         ["1\tCONFIG_BAR\tbar\tkeep\tdrivers/bar.c", "2\tCONFIG_FOO\tfoo\tkeep\tdrivers/foo.c"])
+                         ["1\tCONFIG_BAR\tbar\tauto\tdrivers/bar.c", "2\tCONFIG_FOO\tfoo\tauto\tdrivers/foo.c"])
         self.assertEqual((self.campaign / "baseline.config").read_bytes(), self.base.read_bytes())
         self.assertIn("#define KCFG_COUNT 2\n", (self.campaign / "bridge-config.h").read_text())
         key = DATA["read_campaign_id"](self.campaign)
@@ -71,43 +71,49 @@ IFS= read -r symbol < "$2" && printf ' U %s\\n' "$symbol"
         self.assertIn(f'#define KCFG_LINK_NAME "{name}"\n', (self.campaign / "bridge-config.h").read_text())
         self.assertLessEqual(len(name), 55)
 
-    def test_automatic_inventory_can_trim_covered_unused_options(self):
-        self.prepare("--default-policy", "drop")
-        units = DATA["read_scope"](self.campaign / "scope.tsv", self.linux)
-        self.assertEqual([(u.symbol, u.policy) for u in units], [("CONFIG_BAR", "drop"), ("CONFIG_FOO", "drop")])
+    def test_policy_does_not_filter_observations(self):
+        for policy in ("keep", "drop"):
+            with self.subTest(policy=policy):
+                self.campaign = self.root / policy
+                self.prepare("--default-policy", policy)
+                units = DATA["read_scope"](self.campaign / "scope.tsv", self.linux)
+                self.assertEqual([(u.symbol, u.policy) for u in units], [("CONFIG_BAR", policy), ("CONFIG_FOO", policy)])
 
-    def test_requires_profile_settings_and_unambiguous_policy(self):
-        for opts in (("--drop", "CONFIG_MISSING"), ("--defer", "CONFIG_FOO", "--drop", "CONFIG_FOO")):
-            with self.subTest(opts=opts):
-                self.assertNotEqual(self.prepare(*opts, check=False).returncode, 0)
+    def test_no_external_observation_selectors(self):
+        for flag, value in (("--scope", "units.tsv"), ("--drop", "CONFIG_FOO"), ("--defer", "CONFIG_BAR")):
+            with self.subTest(flag=flag):
+                self.assertIn(f"unrecognized arguments: {flag}", self.prepare(flag, value, check=False).stderr)
                 self.assertFalse(self.campaign.exists())
+
+    def test_requires_profile_settings(self):
         self.base.write_text("CONFIG_MODULES=y\n")
         error = self.prepare(check=False)
         self.assertIn("CONFIG_TRACEPOINTS=y", error.stderr)
         self.assertFalse(self.campaign.exists())
 
-    def test_discovery_handles_continuations_and_ignores_conditional_rules(self):
+    def test_discovery_separates_multi_object_symbols_from_partial_or_ambiguous_bindings(self):
         (self.drivers / "Kbuild").write_text("obj-$(CONFIG_FOO) += first.o \\\n second.o\n"
-                                            "ifneq ($(ARCH),x86)\nobj-$(CONFIG_FOO) += other.o\nendif\n")
-        for name in ("first.c", "second.c", "other.c"):
-            (self.drivers / name).touch()
-        self.assertIn("no unique module", self.prepare("--defer", "CONFIG_FOO", check=False).stderr)
-        self.prepare("--drop", "CONFIG_FOO")
+                                            "obj-$(CONFIG_MIXED) += bar.o composite.o\ncomposite-y := part.o\n"
+                                            "obj-$(CONFIG_VENDOR) += vendor/ extra.o\n"
+                                            "obj-$(CONFIG_CONDITIONAL) += stable.o\n"
+                                            "ifdef CONFIG_ARCH\nobj-$(CONFIG_CONDITIONAL) += optional.o\nendif\n"
+                                            "obj-$(CONFIG_SHARED) += shared.o other.o\nobj-y += shared.o\n"
+                                            "obj-$(CONFIG_AUX) += aux.o\naggregate-$(CONFIG_AUX) += nested.o\n"
+                                            "obj-$(CONFIG_GUARD) += guard.o\nifdef CONFIG_GUARD\nobj-y += nested.o\nendif\n")
+        for name in ("first", "second", "part", "extra", "stable", "optional", "shared", "other", "aux", "nested", "guard"):
+            (self.drivers / (name + ".c")).touch()
+        self.prepare()
         self.assertEqual((self.campaign / "scope.tsv").read_text().splitlines()[1:],
-                         ["1\tCONFIG_FOO\t-\tdrop\tdrivers/first.c", "2\tCONFIG_FOO\t-\tdrop\tdrivers/second.c"])
+                         ["1\tCONFIG_FOO\t-\tauto\tdrivers/first.c", "2\tCONFIG_FOO\t-\tauto\tdrivers/second.c"])
 
-    def test_explicit_scope_and_compiler_receipts_follow_only_mapped_object_compiles(self):
-        scope = self.root / "scope.tsv"
-        scope.write_text("# fixture\n1\tCONFIG_FOO\tfoo\tdefer\tdrivers/foo.c\n")
-        self.assertIn("choose a scope file", self.prepare("--scope", scope, "--drop", "CONFIG_BAR", check=False).stderr)
-        self.prepare("--scope", scope)
-        self.assertEqual((self.campaign / "scope.tsv").read_bytes(), scope.read_bytes())
+    def test_compiler_receipts_follow_the_generated_map_only_on_object_compiles(self):
+        self.prepare()
         wrapper = self.campaign / "clang"
         def invoke(src, *args):
             return subprocess.check_output([wrapper, *args, self.linux / src], text=True).splitlines()
         selected = invoke("drivers/foo.c", "-c", "-o", "foo.o")
-        self.assertIn("-fplugin-arg-kcfgtrace-id=1", selected)
-        self.assertIn(f"-fplugin-arg-kcfgtrace-receipt={self.campaign}/receipts/1", selected)
+        self.assertIn("-fplugin-arg-kcfgtrace-id=2", selected)
+        self.assertIn(f"-fplugin-arg-kcfgtrace-receipt={self.campaign}/receipts/2", selected)
         self.assertIn(f"-fplugin={self.plugin}", selected)
         for args in (("drivers/other/foo.c", "-c", "-o", "foo.o"), ("drivers/foo.c", "-E"),
                      ("drivers/foo.c", "-S", "-o", "foo.s")):
@@ -124,7 +130,7 @@ IFS= read -r symbol < "$2" && printf ' U %s\\n' "$symbol"
                     DATA["read_campaign_id"](self.campaign)
 
     def test_coverage_needs_compiler_receipt_probe_reference_and_single_owner(self):
-        self.prepare("--drop", "CONFIG_FOO", "--defer", "CONFIG_BAR")
+        self.prepare()
         probe = DATA["probe_symbol"](DATA["read_campaign_id"](self.campaign))
         self.compiled("drivers/bar.o", owner="bar", symbol=probe)
         self.compiled("drivers/foo.o", owner="foo")
@@ -142,23 +148,42 @@ IFS= read -r symbol < "$2" && printf ' U %s\\n' "$symbol"
         self.assertEqual(json.loads((self.campaign / "build.json").read_text())["release"], "test-profile")
 
     def test_omitted_members_by_kbuild_module_or_config_disqualify_a_symbol(self):
-        self.prepare("--drop", "CONFIG_FOO")
+        self.prepare()
         probe = DATA["probe_symbol"](DATA["read_campaign_id"](self.campaign))
         self.compiled("drivers/foo.o", owner="foo", symbol=probe)
-        (self.campaign / "receipts/1").write_text("1\n")
+        (self.campaign / "receipts/2").write_text("1\n")
+        self.coverage()
+        self.assertEqual((self.campaign / "coverage.tsv").read_text(), "1\t0\n2\t1\n")
         self.compiled("drivers/missing.o", owner="foo:shared")
         self.assertIn("drivers/missing.o", self.coverage().stderr)
-        self.assertEqual((self.campaign / "coverage.tsv").read_text(), "1\t0\n")
+        self.assertEqual((self.campaign / "coverage.tsv").read_text(), "1\t0\n2\t0\n")
         (self.obj / "drivers/.missing.o.cmd").unlink()
         (self.drivers / "vendor").mkdir()
         (self.drivers / "vendor/Kbuild").write_text("obj-$(CONFIG_FOO) += also.o\n")
         (self.drivers / "vendor/also.c").touch()
         self.compiled("drivers/vendor/also.o", owner="also")
         self.assertIn("drivers/vendor/also.o", self.coverage().stderr)
-        self.assertEqual((self.campaign / "coverage.tsv").read_text(), "1\t0\n")
+        self.assertEqual((self.campaign / "coverage.tsv").read_text(), "1\t0\n2\t0\n")
+
+    def test_config_dependency_outside_observation_is_reported_even_in_observe_only_mode(self):
+        self.prepare("--default-policy", "keep")
+        probe = DATA["probe_symbol"](DATA["read_campaign_id"](self.campaign))
+        self.compiled("drivers/foo.o", owner="foo", symbol=probe)
+        (self.campaign / "receipts/2").write_text("1\n")
+        self.compiled("kernel/console.o", owner="console")
+        cmd = self.obj / "kernel/.console.o.cmd"
+        command = cmd.read_text()
+        for key in ("FOO", "foo.h"):
+            with self.subTest(key=key):
+                cmd.write_text(command + f"deps_kernel/console.o := $(wildcard include/config/{key})\n")
+                self.assertIn("kernel/console.o", self.coverage().stderr)
+                self.assertEqual((self.campaign / "coverage.tsv").read_text(), "1\t0\n2\t0\n")
+        cmd.write_text(command + "deps_kernel/console.o := $(wildcard include/config/FOO_OTHER)\n")
+        self.coverage()
+        self.assertEqual((self.campaign / "coverage.tsv").read_text(), "1\t0\n2\t1\n")
 
     def reviewed(self):
-        self.prepare("--drop", "CONFIG_BAR", "--defer", "CONFIG_FOO")
+        self.prepare()
         probe = DATA["probe_symbol"](DATA["read_campaign_id"](self.campaign))
         for i, name in enumerate(("bar", "foo"), 1):
             self.compiled(f"drivers/{name}.o", owner=name, symbol=probe)
@@ -175,6 +200,20 @@ IFS= read -r symbol < "$2" && printf ' U %s\\n' "$symbol"
         self.candidate()
         self.actual.write_text(self.actual.read_text().replace('"board"', '"other"'))
         self.assertIn("CONFIG_NAME", self.candidate(check=False).stderr)
+
+    def test_candidate_honors_archived_policies_and_only_defers_named_modules(self):
+        self.reviewed()
+        manifest = self.campaign / "scope.tsv"
+        current = manifest.read_text()
+        archived = current.replace("\tbar\tauto\t", "\tbar\tdrop\t").replace("\tfoo\tauto\t", "\tfoo\tdefer\t")
+        manifest.write_text(archived)
+        self.candidate()
+        for name, rule in (("foo", "drop"), ("foo", "keep"), ("bar", "defer"), ("bar", "keep")):
+            with self.subTest(name=name, rule=rule):
+                manifest.write_text(current.replace(f"\t{name}\tauto\t", f"\t{name}\t{rule}\t"))
+                self.assertIn(f"unauthorized configuration change: CONFIG_{name.upper()}", self.candidate(check=False).stderr)
+        manifest.write_text(current.replace("\tfoo\tauto\t", "\t-\tauto\t"))
+        self.assertIn("unauthorized configuration change: CONFIG_FOO", self.candidate(check=False).stderr)
 
     def test_candidate_preserves_capture_attribution_and_board_policy(self):
         self.reviewed()

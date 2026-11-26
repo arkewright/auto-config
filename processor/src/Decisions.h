@@ -10,7 +10,7 @@ struct Proposal {
     bool late{};
 };
 
-Proposal automaticChoice(Row const &row, bool modulesEnabled, bool tristate);
+Proposal automaticChoice(Row const &row, bool modulesEnabled, Switch declaration);
 Bundle materialize(Campaign const &campaign, std::span<Row const> rows);
 
 } // namespace kcfg

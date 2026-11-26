@@ -61,7 +61,7 @@ def read_scope(path, linux):
         number, symbol, module, policy, source = fields
         if not re.fullmatch(r"[1-9][0-9]{0,4}", number) or int(number) > 65535:
             raise ValueError(f"invalid probe id: {number}")
-        if not re.fullmatch(SYMBOL, symbol) or policy not in {"keep", "drop", "defer"}:
+        if not re.fullmatch(SYMBOL, symbol) or policy not in {"auto", "keep", "drop", "defer"}:
             raise ValueError(f"invalid policy: {line}")
         if not re.fullmatch(MODULE, module) and not (module == "-" and policy != "defer"):
             raise ValueError(f"invalid module: {module}")
@@ -81,13 +81,13 @@ def read_scope(path, linux):
 
 
 def literal_bindings(directory):
-    """Read direct, unconditional obj-$(CONFIG_...) bindings with a C source."""
+    """Return direct C bindings and symbols whose visible rules also own unresolved objects."""
     makefile = directory / "Kbuild"
     if not makefile.is_file():
         makefile = directory / "Makefile"
+    bindings, unresolved = defaultdict(set), set()
     if not makefile.is_file():
-        return {}
-    bindings = defaultdict(set)
+        return bindings, unresolved
     nesting = 0
     for line in makefile.read_text(errors="replace").replace("\\\n", " ").splitlines():
         rule = line.partition("#")[0].strip()
@@ -95,49 +95,52 @@ def literal_bindings(directory):
             nesting += 1
         elif rule == "endif":
             nesting = max(0, nesting - 1)
-        elif not nesting and (m := re.fullmatch(rf"obj-\$\(({SYMBOL})\)\s*(?:\+=|:=|=)\s*(.+)", rule)):
-            for name in m[2].split():
+        elif m := re.fullmatch(rf"obj-(?:\$\(({SYMBOL})\)|([ym]))\s*(?:\+=|:=|=)\s*(.+)", rule):
+            owner = m[1] or m[2]
+            for name in m[3].split():
                 if re.fullmatch(r"[\w+-]+\.o", name):
                     source = directory / (name[:-2] + ".c")
                     if source.is_file():
-                        bindings[source].add(m[1])
-    return bindings
+                        bindings[source].add(owner)
+                        if not nesting:
+                            continue
+                unresolved.add(owner)
+                unresolved.update(re.findall(SYMBOL, name))
+            continue
+        # A guard, composite member or other Make expression can use the same switch elsewhere.
+        unresolved.update(re.findall(SYMBOL, rule))
+    return bindings, unresolved
 
 
-def inventory(linux, drop, defer, default_policy):
-    drop, defer = set(drop), set(defer)
-    if drop & defer:
-        raise ValueError("conflicting policies: " + ", ".join(sorted(drop & defer)))
+def inventory(linux, default_policy):
     directories = {linux / "kernel"}
     for subsystem in SUBSYSTEMS:
         for directory, _, files in os.walk(linux / subsystem):
             if "Makefile" in files or "Kbuild" in files:
                 directories.add(Path(directory))
-    bindings = []
-    for directory in sorted(directories):
-        for source, symbols in sorted(literal_bindings(directory).items()):
-            path = source.relative_to(linux).as_posix()
-            if len(symbols) == 1 and supported_source(path):
-                symbol, = symbols
-                bindings.append((symbol, source.stem.replace("-", "_"), path))
-    counts = Counter(symbol for symbol, _, _ in bindings)
+    bindings, unresolved = [], set()
     owners = defaultdict(set)
-    for symbol, module, _ in bindings:
-        owners[module].add(symbol)
-    selected = drop | defer
-    if missing := selected - counts.keys():
-        raise ValueError(f"no direct binding for {', '.join(sorted(missing))}; supply a scope file")
+    for directory in sorted(directories):
+        direct, unknown = literal_bindings(directory)
+        unresolved.update(unknown)
+        for source, symbols in sorted(direct.items()):
+            path = source.relative_to(linux).as_posix()
+            module = source.stem.replace("-", "_")
+            owners[module].update(symbols)
+            if len(symbols) != 1 or not supported_source(path):
+                unresolved.update(symbols)
+                continue
+            symbol, = symbols
+            if symbol.startswith("CONFIG_"):
+                bindings.append((symbol, module, path))
+    counts = Counter(symbol for symbol, _, _ in bindings)
     units = []
     for symbol, module, path in bindings:
-        if selected and symbol not in selected:
-            continue
-        name = module if counts[symbol] == 1 and len(owners[module]) == 1 and re.fullmatch(MODULE, module) else "-"
-        policy = "defer" if symbol in defer else "drop" if symbol in drop else default_policy
-        if policy == "defer" and name == "-":
-            raise ValueError(f"no unique module for {symbol}; supply a scope file")
-        units.append(Unit(symbol, name, policy, path))
+        if symbol not in unresolved:
+            unique = counts[symbol] == 1 and len(owners[module]) == 1 and re.fullmatch(MODULE, module)
+            units.append(Unit(symbol, module if unique else "-", default_policy, path))
     if not 0 < len(units) <= 65535:
-        raise ValueError("no direct bindings or more than 65535 units; supply a scope file")
+        raise ValueError(f"expected 1..65535 unambiguous direct C bindings, found {len(units)}")
     return units
 
 
@@ -193,19 +196,14 @@ def prepare(args):
         if values.get(symbol, "n") != value:
             raise ValueError(f"profiling requires {symbol}={value}")
     linux, campaign = args.linux.resolve(), args.campaign.resolve()
-    if args.scope and (args.drop or args.defer):
-        raise ValueError("choose a scope file or drop/defer policies")
-    units = read_scope(args.scope, linux) if args.scope else inventory(linux, args.drop, args.defer, args.default_policy)
+    units = inventory(linux, args.default_policy)
     campaign.mkdir(parents=True)
     (campaign / "receipts").mkdir()
     shutil.copyfile(args.config, campaign / "baseline.config")
-    if args.scope:
-        shutil.copyfile(args.scope, campaign / "scope.tsv")
-    else:
-        with (campaign / "scope.tsv").open("w") as out:
-            print("# id\tKconfig symbol\tmodule\tpolicy\ttranslation unit", file=out)
-            for i, unit in enumerate(units, 1):
-                print(i, unit.symbol, unit.module, unit.policy, unit.source, sep="\t", file=out)
+    with (campaign / "scope.tsv").open("w") as out:
+        print("# id\tKconfig symbol\tmodule\tpolicy\ttranslation unit", file=out)
+        for i, unit in enumerate(units, 1):
+            print(i, unit.symbol, unit.module, unit.policy, unit.source, sep="\t", file=out)
     key = secrets.token_hex(32)
     name = probe_symbol(key)
     (campaign / "campaign.id").write_text(key + "\n")
@@ -214,32 +212,38 @@ def prepare(args):
     compiler_wrapper(linux, args.cc, campaign, args.plugin.resolve(), units)
 
 
-def compiled_owners(cmd):
+def compiled_inputs(cmd, *, config_deps=False):
     if not cmd.is_file():
-        return ()
+        return (), set()
     with cmd.open(errors="replace") as stream:
         match = re.search(r'''-DKBUILD_MODNAME='?"([A-Za-z0-9_:-]+)"''', stream.readline())
-    return tuple(name.replace("-", "_") for name in match[1].split(":")) if match else ()
+        names = tuple(name.replace("-", "_") for name in match[1].split(":")) if match else ()
+        keys = set()
+        if config_deps:
+            for name, suffix in re.findall(r"\$\(wildcard include/config/([A-Za-z0-9_/]+)(\.h)?\)", stream.read()):
+                # Older fixdep output spells SERIAL_8250_CONSOLE as serial/8250/console.h.
+                keys.add("CONFIG_" + (name.upper().replace("/", "_") if suffix else name))
+    return names, keys
 
 
 def object_owner(target):
-    names = compiled_owners(target.with_name(f".{target.name}.cmd"))
+    names, _ = compiled_inputs(target.with_name(f".{target.name}.cmd"))
     return names[0] if len(names) == 1 else None
 
 
 def omitted_members(linux, obj, units, bindings):
-    # An unlisted compiled source with the same Kconfig or Kbuild module owner
-    # disqualifies the whole option, even if it has a different object basename.
-    symbols = {u.symbol for u in units if u.policy != "keep"}
-    if not symbols:
-        return {}
+    # Only symbols with a compiled owner could otherwise claim full coverage.
+    symbols = set()
     listed = defaultdict(set)
     by_owner = defaultdict(set)
     for u in units:
         source = Path(u.source)
         listed[u.symbol].add(source)
-        if u.symbol in symbols and (owner := object_owner(obj / source.with_suffix(".o"))):
+        if owner := object_owner(obj / source.with_suffix(".o")):
             by_owner[owner].add(u.symbol)
+            symbols.add(u.symbol)
+    if not symbols:
+        return {}
     missing = {}
     for directory, _, files in os.walk(obj):
         targets = {f for f in files if f.endswith(".o")}
@@ -250,8 +254,9 @@ def omitted_members(linux, obj, units, bindings):
             target = Path(directory, name).relative_to(obj)
             source = target.with_suffix(".c")
             cmd = Path(directory, f".{name}.cmd")
-            owners = {s for owner in compiled_owners(cmd) for s in by_owner.get(owner, ())}
-            owners.update(bindings(linux / source) & symbols)
+            names, deps = compiled_inputs(cmd, config_deps=True)
+            owners = {s for owner in names for s in by_owner.get(owner, ())}
+            owners.update((bindings(linux / source) | deps) & symbols)
             for symbol in owners:
                 if source not in listed[symbol]:
                     missing.setdefault(symbol, target)
@@ -266,11 +271,11 @@ def coverage(args):
     directories = {}
     def bindings(source):
         if source.parent not in directories:
-            directories[source.parent] = literal_bindings(source.parent)
+            directories[source.parent], _ = literal_bindings(source.parent)
         return directories[source.parent].get(source, set())
     missing = omitted_members(linux, obj, units, bindings)
     for opt, target in sorted(missing.items()):
-        print(f"keeping {opt}: Kbuild also compiled unlisted member {target}", file=sys.stderr)
+        print(f"keeping {opt}: Kbuild records a dependency outside observation in {target}", file=sys.stderr)
     with (campaign / "coverage.tsv").open("w") as counts, (campaign / "objects.tsv").open("w") as objects:
         print("id\tsource\tkbuild_module\tverified_sites", file=objects)
         for i, u in enumerate(units, 1):
@@ -279,7 +284,8 @@ def coverage(args):
             owner = object_owner(target)
             direct = bindings(linux / u.source)
             count = 0
-            if (u.symbol not in missing and owner and (u.module == "-" or u.module.replace("-", "_") == owner) and
+            expected_owner = target.stem if u.module == "-" and direct else u.module
+            if (u.symbol not in missing and owner and (expected_owner == "-" or expected_owner.replace("-", "_") == owner) and
                     (not direct or direct == {u.symbol}) and receipt.is_file() and target.is_file()):
                 sites = int(receipt.read_text())
                 if sites > 0:
@@ -320,15 +326,22 @@ def candidate(args):
         if sites.get(i, 0) <= 0 or u.symbol == "CONFIG_MODULES":
             allowed[u.symbol] = "keep"
 
+    actual = config_values(args.config)
+    removable = {symbol for symbol, policy in allowed.items() if policy in {"auto", "drop"}}
+    deferrable = {u.symbol: u.module for u in units if allowed[u.symbol] in {"auto", "defer"} and u.module != "-"
+                  and actual.get("CONFIG_MODULES") == "y"}
     overrides = explicit_settings(plan, baseline)
     changes = {}
-    automatic = {("defer", "y", "m"), ("drop", "y", "n"), ("drop", "m", "n")}
     for row in (plan / "changes.tsv").read_text().splitlines():
         match = re.fullmatch(rf"({SYMBOL})\t([nmy])\t([nmy])", row)
         if not match:
             raise ValueError(f"invalid configuration change: {row}")
         key, old, new = match.groups()
-        authorized = overrides[key] == new if key in overrides else (allowed.get(key), old, new) in automatic
+        if key in overrides:
+            authorized = overrides[key] == new
+        else:
+            authorized = ((key in removable and old in {"y", "m"} and new == "n") or
+                          (key in deferrable and old == "y" and new == "m"))
         if key in changes or old == new or baseline.get(key, "n") != old or not authorized:
             raise ValueError(f"unauthorized configuration change: {row}")
         changes[key] = new
@@ -336,13 +349,12 @@ def candidate(args):
     for key, value in overrides.items():
         if expected.get(key, "n") != value:
             raise ValueError(f"explicit setting missing from reviewed changes: {key}={value}")
-    actual = config_values(args.config)
     for key in sorted(expected.keys() | actual.keys()):
         want, got = expected.get(key, "n"), actual.get(key, "n")
         if want != got:
             raise ValueError(f"normalized configuration differs from reviewed changes: {key}: {want} -> {got}")
-    eligible = {u.module: u.symbol for u in units if allowed[u.symbol] == "defer" and u.symbol not in overrides
-                and actual.get(u.symbol) == "m"}
+    eligible = {module: symbol for symbol, module in deferrable.items()
+                if symbol not in overrides and actual.get(symbol) == "m"}
     converted = {module for module, symbol in eligible.items() if baseline.get(symbol) == "y"}
     late = (plan / "modules-load.late").read_text().splitlines()
     if len(late) != len(set(late)) or not converted <= set(late) <= eligible.keys():
@@ -359,10 +371,7 @@ def main():
     start.add_argument("--config", required=True, type=Path)
     start.add_argument("--cc", required=True)
     start.add_argument("--plugin", required=True, type=Path)
-    start.add_argument("--scope", type=Path)
-    start.add_argument("--default-policy", choices=("keep", "drop"), default="keep")
-    start.add_argument("--drop", action="append", default=[])
-    start.add_argument("--defer", action="append", default=[])
+    start.add_argument("--default-policy", choices=("auto", "keep", "drop"), default="auto")
     finish = sub.add_parser("coverage", parents=[common])
     finish.add_argument("--obj", required=True, type=Path)
     finish.add_argument("--nm", required=True)

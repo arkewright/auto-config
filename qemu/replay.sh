@@ -33,7 +33,7 @@ make -s -C "$LINUX_SRC" "O=$output/fixture" ARCH=x86_64 "LLVM=$LLVM_PREFIX/bin/"
         printf '%s=%q\n' "$key" "${!key}"
     done
     printf 'WORK=%q\n' "$output"
-    printf '%s\n' 'ARCH=x86_64' 'KERNEL_CONFIG="$WORK/fixture/.config"' 'SCOPE="$ROOT/examples/qemu.scope.tsv"' \
+    printf '%s\n' 'ARCH=x86_64' 'KERNEL_CONFIG="$WORK/fixture/.config"' \
         'TRACE="$WORK/guests/profile/trace.tsv"' 'PACKAGE_DIR="$WORK/packages"'
 } > "$output/replay.env"
 cli=("$ROOT/kcfg" --env "$output/replay.env")
@@ -54,18 +54,47 @@ boot() {
 boot baseline baseline
 "${cli[@]}" --build-kernel profile
 boot profile profile --module "$output/profile/driver/kcfg_collect.ko"
-# ELF executes in both windows; the config reader only in the workload; CP850 in neither.
-diff -u <(printf '1\t1\t1\n2\t0\t1\n3\t0\t0\n') \
-    <(rg '^\d+\t' "$output/guests/profile/trace.tsv" | cut -f1-3 | sort -n)
+check_hits() {
+    local id prefix
+    id=$(<"$output/profile/campaign/by-source/$1")
+    printf -v prefix '%s\t%s\t%s\t' "$id" "$2" "$3"
+    rg -q "^${prefix}[01]$" "$output/guests/profile/trace.tsv" || { printf 'Unexpected hits: %s\n' "$1" >&2; return 1; }
+}
+check_hits fs/binfmt_elf.c 1 1
+check_hits kernel/configs.c 0 1
+check_hits fs/nls/nls_cp850.c 0 0
 "${cli[@]}" --plan --batch
-diff -u <(printf 'CONFIG_IKCONFIG\ty\tm\nCONFIG_NLS_CODEPAGE_850\ty\tn\n') <(sort "$output/plan/changes.tsv")
-diff -u <(printf 'configs\n') "$output/plan/modules-load.late"
+rg -q '^CONFIG_BINFMT_ELF\ty\ty\t1\t1\t' "$output/plan/report.tsv"
+rg -Fxq $'CONFIG_IKCONFIG\ty\tm' "$output/plan/changes.tsv"
+rg -Fxq $'CONFIG_NLS_CODEPAGE_850\ty\tn' "$output/plan/changes.tsv"
+rg -Fxq configs "$output/plan/modules-load.late"
 "${cli[@]}" --build-kernel candidate
-boot candidate candidate --late-module "$output/candidate/kernel/kernel/configs.ko"
+
+# Resolve the actual package's late modules in dependency order; omit only configs in the control.
+stage="$output/fixture/modules"
+release=$(<"$output/candidate/kernel/include/config/kernel.release")
+mkdir -- "$stage"
+tar -xf "$output/packages/kernel-candidate.tar.gz" -C "$stage" --strip-components=1 kernel-candidate/lib/modules
+depmod -b "$stage" "$release"
+late=() control=()
+declare -A added=()
+while IFS= read -r module; do
+    paths=$(modprobe -C /dev/null -d "$stage" -S "$release" --show-depends -- "$module")
+    while IFS=' ' read -r action file; do
+        [[ $action != builtin ]] || continue
+        [[ $action == insmod && -f $file ]] || { printf 'Unexpected module dependency: %s %s\n' "$action" "$file" >&2; exit 1; }
+        if [[ ! -v added["$file"] ]]; then
+            added["$file"]=1
+            late+=(--late-module "$file")
+            if [[ ${file##*/} != configs.ko ]]; then control+=(--late-module "$file"); fi
+        fi
+    done <<< "$paths"
+done < "$output/plan/modules-load.late"
+boot candidate candidate "${late[@]}"
 status=0
-boot candidate without-module || status=$?
-[[ $status == 1 ]] && rg -Fxq 'status=failed' "$output/guests/without-module/guest.status" && \
-    rg -Fxq 'stage=workload' "$output/guests/without-module/guest.status" || {
+boot candidate without-module "${control[@]}" || status=$?
+[[ $status == 1 ]] && rg -Fxq 'ready=yes' "$output/guests/without-module/guest.status" && \
+    rg -Fxq 'status=failed' "$output/guests/without-module/guest.status" && rg -Fxq 'stage=workload' "$output/guests/without-module/guest.status" || {
         printf 'Negative control must boot and then fail in the workload.\n' >&2; exit 1;
     }
 printf 'Ubuntu replay passed, including the negative control: %s\n' "$output"

@@ -31,7 +31,7 @@ cd -- "$ROOT"
 source "$settings"
 # Kbuild and the compiler wrapper change directory. Resolve host paths once, here.
 for key in LINUX_SRC LLVM_SRC LLVM_PREFIX FTXUI_SRC FTXUI_DIR LLVM_BUILD HOST_BUILD SYSROOT WORK \
-           KERNEL_CONFIG SCOPE TRACE PACKAGE_DIR DEPLOY_SCRIPT DEPENDENCY_GRAPH FORCE_CONFIG; do
+           KERNEL_CONFIG TRACE PACKAGE_DIR DEPLOY_SCRIPT DEPENDENCY_GRAPH FORCE_CONFIG; do
     if [[ -n ${!key:-} ]]; then printf -v "$key" '%s' "$(realpath -m -- "${!key}")"; fi
 done
 for key in BOOTSTRAP_CC BOOTSTRAP_CXX TOOLS_CC TOOLS_CXX KERNEL_CC HOSTCC HOSTCXX; do
@@ -107,7 +107,7 @@ capture() { "$PYTHON" -I "$ROOT/scripts/capture.py" "$@"; }
 
 build_kernel() {
     local role=$1 obj="$WORK/$1/kernel" compiler localversion="$RELEASE_SUFFIX-$1" campaign="$WORK/profile/campaign"
-    local host_flags=() policy=() key id image boot_tree="arch/$ARCH/boot"
+    local host_flags=() id image boot_tree="arch/$ARCH/boot"
     unset KCONFIG_ALLCONFIG KBUILD_OUTPUT KBUILD_EXTMOD KBUILD_EXTMOD_OUTPUT MAKEFLAGS MFLAGS
     case $ARCH in
         x86|x86_64|i386) image=bzImage; boot_tree=arch/x86/boot ;;
@@ -133,13 +133,8 @@ build_kernel() {
     mkdir -- "$obj" || fail "use a new WORK or move the previous $WORK/$role before rebuilding"
     configure_kernel
     if [[ $role == profile ]]; then
-        if [[ -n $SCOPE ]]; then policy=(--scope "$SCOPE"); else
-            for key in "${DROP[@]}"; do policy+=(--drop "$key"); done
-            for key in "${DEFER[@]}"; do policy+=(--defer "$key"); done
-            if (( ! ${#policy[@]} )); then policy=(--default-policy "${INVENTORY_POLICY:-keep}"); fi
-        fi
         capture prepare --linux "$LINUX_SRC" --cc "$compiler" --plugin "$HOST_BUILD/plugin/kcfg_frontend.so" \
-            --config "$obj/.config" --campaign "$campaign" "${policy[@]}"
+            --config "$obj/.config" --campaign "$campaign" --default-policy "${INVENTORY_POLICY:-auto}"
         id=$(<"$campaign/campaign.id"); localversion+="-${id:0:16}"
         compiler="$campaign/clang"
     elif [[ $role == candidate ]]; then

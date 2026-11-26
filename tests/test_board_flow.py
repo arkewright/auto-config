@@ -177,6 +177,19 @@ p.write_text('\\n'.join(lines) + '\\n')
         self.assertTrue((out / "kernel/arch/x86/boot/bzImage").is_file())
         self.assertEqual(self.log.read_text().splitlines(), ["modules"])
 
+    def test_profile_entry_applies_one_mode_to_the_generated_inventory(self):
+        self.sdk()
+        self.kernel_source()
+        drivers = self.deps / "linux/drivers"
+        drivers.mkdir()
+        (drivers / "Kbuild").write_text("obj-$(CONFIG_LEFT) += left.o\nobj-$(CONFIG_RIGHT) += right.o\n")
+        for source in ("left.c", "right.c"):
+            (drivers / source).touch()
+        self.settings(INVENTORY_POLICY="keep")
+        self.cli("--build-kernel", "profile")
+        rows = (self.work / "profile/campaign/scope.tsv").read_text().splitlines()[1:]
+        self.assertEqual(rows, ["1\tCONFIG_LEFT\tleft\tkeep\tdrivers/left.c", "2\tCONFIG_RIGHT\tright\tkeep\tdrivers/right.c"])
+
     def test_riscv_selects_image_and_device_trees_by_changing_arch_only(self):
         self.sdk()
         self.kernel_source()

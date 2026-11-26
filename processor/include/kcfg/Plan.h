@@ -14,7 +14,7 @@ template<typename T>
 using Result = std::expected<T, std::string>;
 
 enum struct Setting { absent, no, module, yes, other };
-enum struct Policy { keep, drop, defer };
+enum struct Policy { keep, drop, defer, automatic };
 
 struct Baseline {
     std::vector<std::string> lines;

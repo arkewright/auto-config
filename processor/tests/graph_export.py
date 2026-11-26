@@ -46,6 +46,12 @@ config SHOW_HELPER
 config HELPER
 	tristate "Optional helper" if SHOW_HELPER
 	depends on RIGHT
+config PRIVATE_DEFAULT
+	bool
+	default y
+config PROMPT_DEFAULT
+	bool "Editable when helper is hidden" if !SHOW_HELPER
+	default y
 config SCALAR
 	string "Scalar"
 	default "board name"
@@ -146,10 +152,12 @@ def main(program, native):
         campaign.mkdir()
         ident = "aa" * 32
         (campaign / "campaign.id").write_text(ident + "\n")
-        (campaign / "scope.tsv").write_text("1\tCONFIG_USED\tused\tdrop\tdrivers/used.c\n")
-        (campaign / "coverage.tsv").write_text("1\t1\n")
+        (campaign / "scope.tsv").write_text("1\tCONFIG_USED\tused\tdrop\tdrivers/used.c\n"
+                                            "2\tCONFIG_PRIVATE_DEFAULT\t-\tauto\tdrivers/private.c\n"
+                                            "3\tCONFIG_PROMPT_DEFAULT\t-\tauto\tdrivers/prompt.c\n")
+        (campaign / "coverage.tsv").write_text("1\t1\n2\t1\n3\t1\n")
         trace = root / "trace.tsv"
-        trace.write_text(f"KCFG-TRACE\t1\t{ident}\n1\t0\t1\t0\nEND\t1\n")
+        trace.write_text(f"KCFG-TRACE\t1\t{ident}\n1\t0\t1\t0\n2\t0\t0\t0\n3\t0\t0\t0\nEND\t3\n")
         baseline = campaign / "baseline.config"
         baseline.write_text(BASE)
         original = normalize(baseline)

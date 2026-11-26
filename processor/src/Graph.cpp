@@ -120,11 +120,11 @@ int promote(int bound, bool tristate) { return bound == 1 and not tristate ? 2 :
 struct GraphImpl final : DependencyGraph {
     Names index;
     std::vector<Symbol> declarations;
-    std::map<std::string, bool> switches;
+    std::map<std::string, Switch> switches;
     std::optional<Id> modules;
     std::vector<Rule> rules;
 
-    std::map<std::string, bool> const &symbols() const override { return switches; }
+    std::map<std::string, Switch> const &symbols() const override { return switches; }
 
     Conflict conflict(std::string message, std::vector<Id> ids, std::initializer_list<Predicate const *> expressions,
                       bool moduleSensitive = false) const {
@@ -230,13 +230,14 @@ Result<std::unique_ptr<DependencyGraph>> parseGraph(Text text) {
             auto f = split(rows[i], '\t');
             if (f[0] != "symbol" and f[0] != "absent") continue;
             bool present = f[0] == "symbol";
-            if (f.size() != (present ? 3u : 2u) or not symbolName(f[1]) or
+            bool hidden = present and f.size() == 4 and f[3] == "hidden";
+            if ((present ? f.size() != 3 and not hidden : f.size() != 2) or not symbolName(f[1]) or
                 (present and f[2] != "bool" and f[2] != "tristate")) throw std::invalid_argument{"invalid symbol declaration"};
             if (not graph->index.emplace(f[1], graph->declarations.size()).second)
                 throw std::invalid_argument{"duplicate symbol: " + std::string{f[1]}};
             bool tri = present and f[2] == "tristate";
             graph->declarations.push_back({std::string{f[1]}, tri, present});
-            if (present) graph->switches.emplace(f[1], tri);
+            if (present) graph->switches.emplace(f[1], Switch{.tristate = tri, .visible = not hidden});
         }
         if (graph->switches.empty()) return std::unexpected{"no switch declarations in graph"};
         auto const &names = graph->index;

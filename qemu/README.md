@@ -4,7 +4,7 @@ QEMU 在宿主机上引导 x86_64 内核和 Ubuntu Base，用于回归采集、�
 
 ## 四次启动
 
-先用项目 `.env` 选择 Linux 源码和带 X86 后端的 LLVM，在宿主机上构建插件和处理器。回放使用 `uv` 导出客体配置的依赖图，通过 `--plan --batch` 完成分析。QEMU 测试额外使用 `qemu-system-x86_64`、静态 x86_64 BusyBox、bsdtar、readelf、modinfo 和 ripgrep。首次下载 Ubuntu Base 用到 curl；离线回放还需提前缓存解析器的 Python 依赖。
+先用项目 `.env` 选择 Linux 源码和带 X86 后端的 LLVM，在宿主机上构建插件和处理器。回放使用 `uv` 导出客体配置的依赖图，通过 `--plan --batch` 完成分析。QEMU 测试额外使用 `qemu-system-x86_64`、静态 x86_64 BusyBox、bsdtar、readelf、kmod 工具（modinfo、depmod、modprobe）和 ripgrep。首次下载 Ubuntu Base 用到 curl；离线回放还需提前缓存解析器的 Python 依赖。
 
 ```sh
 ./kcfg --init-deps
@@ -12,7 +12,7 @@ QEMU 在宿主机上引导 x86_64 内核和 Ubuntu Base，用于回归采集、�
 qemu/replay.sh build/qemu-01 .env
 ```
 
-最后一条也可写成 `just replay build/qemu-01`。使用尚不存在的输出目录；脚本继承指定配置中的工具链和宿主构建位置，使用独立的 x86_64 配置、观测清单和包目录。它以 `allnoconfig` 和两个客体片段生成测试基线，再通过 `./kcfg --env` 编译基线、采集版、候选版，运行[四次启动](../docs/validation.md#复现)。
+最后一条也可写成 `just replay build/qemu-01`。使用尚不存在的输出目录；脚本继承指定配置中的工具链和宿主构建位置。它以 `allnoconfig` 和两个 x86_64 客体片段生成测试基线，通过 `./kcfg --env` 构建三版内核，按自动生成的文件编号检查命中，并用候选包中的模块运行[四次启动](../docs/validation.md#复现)。
 
 默认首次启动时下载 Ubuntu Base 24.04.4 amd64，之后复用缓存。离线时可指定本机归档：
 

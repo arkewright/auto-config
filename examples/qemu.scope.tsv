@@ -1,4 +1,0 @@
-# id	Kconfig symbol	module	policy	translation unit
-1	CONFIG_BINFMT_ELF	-	keep	fs/binfmt_elf.c
-2	CONFIG_IKCONFIG	configs	defer	kernel/configs.c
-3	CONFIG_NLS_CODEPAGE_850	nls_cp850	drop	fs/nls/nls_cp850.c
