@@ -4,7 +4,7 @@ QEMU 在宿主机上引导 x86_64 内核和 Ubuntu Base，用于回归采集、�
 
 ## 四次启动
 
-先用项目 `.env` 选择 Linux 源码和带 X86 后端的 LLVM，在宿主机上构建插件和处理器。QEMU 测试额外使用 `qemu-system-x86_64`、静态 x86_64 BusyBox、bsdtar、readelf、modinfo 和 ripgrep。首次下载 Ubuntu Base 用到 curl。
+先用项目 `.env` 选择 Linux 源码和带 X86 后端的 LLVM，在宿主机上构建插件和处理器。回放使用 `uv` 导出客体配置的依赖图，通过 `--plan --batch` 完成分析。QEMU 测试额外使用 `qemu-system-x86_64`、静态 x86_64 BusyBox、bsdtar、readelf、modinfo 和 ripgrep。首次下载 Ubuntu Base 用到 curl；离线回放还需提前缓存解析器的 Python 依赖。
 
 ```sh
 ./kcfg --init-deps

@@ -11,7 +11,9 @@ just check
 just replay build/replay-01
 ```
 
-第一条命令运行现有宿主构建中的组件测试。第二条命令在新目录中建立适合 Ubuntu 客体的小型配置，调用公开入口构建三版内核并运行四次启动。额外软件和离线运行方法见 [QEMU 测试说明](../qemu/README.md)。
+第一条命令运行宿主组件测试。安装了 tmux 时，还会在真实终端中操作编辑器，检查锁定提示、草稿恢复和应用结果。需要将依赖决策与原生 Kconfig 对照时，在 `TOOLS_CMAKE_ARGS` 中加入 `-DKCFG_NATIVE_CONF=/绝对路径/scripts/kconfig/conf`，指向已构建的目标内核配置工具，再重建宿主工具。
+
+第二条命令在新目录中建立适合 Ubuntu 客体的小型配置，调用公开入口构建三版内核并运行四次启动。额外软件和离线运行方法见 [QEMU 测试说明](../qemu/README.md)。
 
 | 启动 | 负载与判定 |
 |---|---|
@@ -40,6 +42,8 @@ tests/check-initializer.sh build/replay-01 build/replay-01/init-test
 ## 原生 defconfig 下的 SQLite 负载
 
 基线用 Linux 7.4-rc3 的 x86_64 `defconfig` 直接生成。无网卡的 QEMU/KVM 客体中，候选内核关闭了 14 个允许移除的硬件选项中的 13 个；其余 1 个因插桩覆盖不足而保留。
+
+将同一快照和外部解析器导出的依赖图交给新编辑器，得到与原候选逐字一致的配置请求。强制 `CONFIG_E1000=y` 后只关闭 12 项。同时强制 `CONFIG_E1000E=n` 和 `CONFIG_E1000E_HWTS=y` 时，编辑器指出时间戳功能依赖网卡驱动，拒绝应用。
 
 两版未插桩内核各预热 1 次，再按交替顺序冷启动 20 对。客户机挂载 ext4 业务盘后记录就绪时间，再运行 SQLite 3.45.1。全部 40 次均通过 10 万笔订单的并发读隔离、营收和备份校验。
 

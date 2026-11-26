@@ -37,6 +37,14 @@ ROWS = [
     ("NO_MODULE", "-", "defer", "drivers/builtin.c"),
     ("MODULES", "-", "drop", "kernel/module/example.c"),
 ]
+SWITCHES = {
+    "MODULES": "bool", "USED": "tristate", "IDLE": "bool", "ROOT": "tristate",
+    "LATE": "tristate", "PARTIAL": "bool", "ALWAYS": "bool", "ALREADY": "tristate",
+    "OFF": "bool", "NO_MODULE": "tristate", "UNRELATED": "bool", "ABSENT": "bool",
+}
+GRAPH = "KCFG-GRAPH\t1\nmodules\tCONFIG_MODULES\n" + "".join(
+    f"symbol\tCONFIG_{name}\t{kind}\n" for name, kind in SWITCHES.items()
+)
 HITS = {1: "0\t0\t1", 2: "0\t1\t0", 3: "0\t0\t1", 4: "1\t0\t0", 5: "0\t1\t0"}
 CAMPAIGN_ID = "0123456789abcdef" * 4
 OTHER_CAMPAIGN_ID = "d" * 64
@@ -68,13 +76,15 @@ class Contract(unittest.TestCase):
             "scope.tsv": self.scope,
             "coverage.tsv": self.coverage,
             "campaign.id": CAMPAIGN_ID + "\n",
+            "dependencies.tsv": GRAPH,
         }.items():
             (self.campaign / name).write_text(data)
         self.trace.write_text(trace_for(CAMPAIGN_ID, HITS))
 
-    def plan(self, *extra, output=None):
+    def plan(self, *extra, output=None, batch=True):
+        flags = ["--batch"] if batch else []
         return subprocess.run(
-            [PROGRAM, self.campaign, self.trace, output or self.output, *extra],
+            [PROGRAM, self.campaign, self.trace, output or self.output, *flags, *extra],
             check=False,
             capture_output=True,
             text=True,
@@ -138,7 +148,7 @@ class Contract(unittest.TestCase):
         self.assertEqual(self.result("modules-load.late"), "")
 
     def test_no_module_support(self):
-        text = BASELINE.replace("CONFIG_MODULES=y", "# CONFIG_MODULES is not set")
+        text = BASELINE.replace("CONFIG_MODULES=y", "# CONFIG_MODULES is not set").replace("=m\n", "=y\n")
         (self.campaign / "baseline.config").write_text(text + "\n")
         self.ok()
         self.assertEqual(
@@ -268,13 +278,102 @@ class Contract(unittest.TestCase):
         self.assertEqual(self.result("campaign.id"), CAMPAIGN_ID + "\n")
         self.assertEqual(list(self.root.glob(".kcfg-plan-*")), [])
 
-    def test_review_requires_terminal(self):
-        self.refused("--review")
+    def with_rules(self, *rules):
+        graph = self.root / "parser-export.tsv"
+        graph.write_text(GRAPH + "".join(row + "\n" for row in rules))
+        return graph
+
+    def force(self, opinions):
+        path = self.root / "opinions.config"
+        path.write_text(opinions)
+        return path
+
+    def test_default_requires_terminal(self):
+        proc = self.plan(batch=False)
+        self.assertNotEqual(proc.returncode, 0)
+        self.assertIn("interactive terminal", proc.stderr)
+        self.assertFalse(self.output.exists())
+
+    def test_missing_or_incomplete_graph(self):
+        path = self.campaign / "dependencies.tsv"
+        path.unlink()
+        self.refused(diagnostic="dependencies.tsv")
+        path.write_text(GRAPH.replace("symbol\tCONFIG_USED\ttristate\n", ""))
+        self.refused(diagnostic="CONFIG_USED")
+        path.write_text(GRAPH + "depends\tCONFIG_USED\tCONFIG_IDLE ||\n")
+        self.refused(diagnostic="dependencies.tsv")
+
+    def test_forced_values_are_an_explicit_authority(self):
+        opinions = self.force("# final board choices\nCONFIG_USED=n\nCONFIG_IDLE=y\nCONFIG_LATE=m\nCONFIG_ABSENT=y\nCONFIG_OFF=y\n")
+        proc = self.plan("--force", opinions)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("CONFIG_USED: locked by forced opinion; overrides recorded use", proc.stderr)
+        self.assertEqual(self.result("overrides.tsv").splitlines(), [
+            "CONFIG_ABSENT\ty\tforced", "CONFIG_IDLE\ty\tforced", "CONFIG_LATE\tm\tforced",
+            "CONFIG_OFF\ty\tforced", "CONFIG_USED\tn\tforced",
+        ])
+        config = self.result("requested.config")
+        for item in ("CONFIG_IDLE=y", "CONFIG_LATE=m", "CONFIG_ABSENT=y", "CONFIG_OFF=y", "# CONFIG_USED is not set"):
+            self.assertIn(item, config.splitlines())
+        self.assertIn("CONFIG_ABSENT\tn\ty\n", self.result("changes.tsv"))
+        self.assertEqual(self.result("modules-load.late"), "already\n")
+
+    def test_invalid_opinions_do_not_publish(self):
+        for value in ("CONFIG_USES=y", "CONFIG_NUM=n", "CONFIG_IDLE=m", "CONFIG_IDLE=maybe", "CONFIG_IDLE=y\nCONFIG_IDLE=n"):
+            with self.subTest(opinions=value):
+                self.refused("--force", self.force(value))
+
+    def test_force_dependency_conflict_is_not_applied(self):
+        graph = self.with_rules("depends\tCONFIG_USED\tCONFIG_IDLE")
+        self.refused("--graph", graph, "--force", self.force("CONFIG_USED=y\nCONFIG_IDLE=n\n"), diagnostic="cannot apply")
+
+    def test_dependency_chain_protects_zero_hit_prerequisites(self):
+        graph = self.with_rules("depends\tCONFIG_USED\tCONFIG_IDLE", "depends\tCONFIG_IDLE\tCONFIG_ALWAYS")
+        (self.campaign / "scope.tsv").write_text(self.scope.replace("keep\tdrivers/always", "drop\tdrivers/always"))
+        self.ok("--graph", graph)
+        self.assertEqual(self.result("changes.tsv"), "CONFIG_LATE\ty\tm\n")
+        self.assertIn("CONFIG_IDLE\ty\ty\t0\t0\t1\t1\t1\tretained:", self.result("report.tsv"))
+
+    def test_drop_unused_parent_and_child_together(self):
+        graph = self.with_rules("depends\tCONFIG_ALWAYS\tCONFIG_IDLE")
+        (self.campaign / "scope.tsv").write_text(self.scope.replace("keep\tdrivers/always", "drop\tdrivers/always"))
+        self.ok("--graph", graph)
+        self.assertEqual(self.result("changes.tsv").splitlines(), [
+            "CONFIG_ALWAYS\ty\tn", "CONFIG_IDLE\ty\tn", "CONFIG_LATE\ty\tm",
+        ])
+
+    def test_disjunction_retains_one_available_alternative(self):
+        graph = self.with_rules("depends\tCONFIG_USED\tCONFIG_ALWAYS CONFIG_IDLE ||")
+        (self.campaign / "scope.tsv").write_text(self.scope.replace("keep\tdrivers/always", "drop\tdrivers/always"))
+        self.ok("--graph", graph)
+        config = self.result("requested.config").splitlines()
+        self.assertIn("CONFIG_USED=y", config)
+        self.assertEqual(sum(f"CONFIG_{symbol}=y" in config for symbol in ("ALWAYS", "IDLE")), 1)
+
+    def test_unreachable_branch_does_not_protect_unused_option(self):
+        graph = self.with_rules("depends\tCONFIG_USED\tCONFIG_IDLE CONFIG_OFF && CONFIG_ALWAYS ||")
+        (self.campaign / "scope.tsv").write_text(self.scope.replace("keep\tdrivers/always", "drop\tdrivers/always"))
+        self.ok("--graph", graph)
+        self.assertEqual(self.result("changes.tsv"), "CONFIG_IDLE\ty\tn\nCONFIG_LATE\ty\tm\n")
+
+    def test_conditional_select_evaluates_current_config(self):
+        graph = self.with_rules("select\tCONFIG_USED\tCONFIG_IDLE\tCONFIG_UNRELATED")
+        self.ok("--graph", graph)
+        self.assertIn("CONFIG_IDLE=y", self.result("requested.config").splitlines())
+        other = self.root / "after"
+        proc = self.plan("--graph", graph, "--force", self.force("CONFIG_UNRELATED=n"), output=other)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        self.assertIn("# CONFIG_IDLE is not set", (other / "requested.config").read_text().splitlines())
+
+    def test_batch_ignores_interactive_draft(self):
+        self.output.with_suffix(".draft").write_text("unrelated draft")
+        self.ok()
+        self.assertIn("CONFIG_IDLE\ty\tn\n", self.result("changes.tsv"))
 
     @unittest.skipUnless(
         INTERACTIVE and shutil.which("tmux"), "run with --tmux for PTY interaction"
     )
-    def test_review_in_terminal(self):
+    def test_editor_in_terminal(self):
         socket_root = Path(
             os.environ.get("CLAUDE_TMUX_SOCKET_DIR", "/tmp/claude-tmux-sockets")
         )
@@ -282,6 +381,9 @@ class Contract(unittest.TestCase):
         temp = tempfile.TemporaryDirectory(prefix="kcfg-plan-", dir=socket_root)
         self.addCleanup(temp.cleanup)
         tmux = ["tmux", "-S", str(Path(temp.name) / "test.sock"), "-f", "/dev/null"]
+
+        opinions = self.force("CONFIG_IDLE=y\n")
+        graph = self.with_rules("depends\tCONFIG_USED\tCONFIG_ALWAYS")
 
         def launch():
             subprocess.run(
@@ -299,7 +401,7 @@ class Contract(unittest.TestCase):
                     str(self.campaign),
                     str(self.trace),
                     str(self.output),
-                    "--review",
+                    "--force", str(opinions), "--graph", str(graph),
                 ],
                 check=True,
             )
@@ -329,21 +431,64 @@ class Contract(unittest.TestCase):
                 [*tmux, "kill-server"], check=False, capture_output=True
             )
         )
+        def shown(text):
+            wait(lambda: text in screen().stdout)
+
+        def row(before, current, symbol):
+            wait(lambda: any(line.split()[:5] == [">", "*", before, current, symbol]
+                             for line in screen().stdout.splitlines()))
+
         launch()
-        wait(lambda: "Kernel configuration review" in screen().stdout)
+        shown("Kernel configuration editor")
         send("q")
         wait(lambda: screen().returncode != 0)
         self.assertFalse(self.output.exists())
+
         launch()
-        wait(lambda: "[x] CONFIG_LATE" in screen().stdout)
-        send("End", "Space")
-        wait(lambda: "[ ] CONFIG_LATE" in screen().stdout)
+        shown("Kernel configuration editor")
+        send("?")
+        shown("Configuration editor help")
+        send("?", "/idle", "Enter", "i", "n")
+        shown("CONFIG_IDLE is locked by forced opinion at y")
+        send("a")
+        shown("Analysis complete")
+        send("/unrelated", "Enter", "i", "n")
+        row("y", "n", "CONFIG_UNRELATED")
         send("s")
+        shown("Draft saved")
+        self.assertFalse(self.output.exists())
+        self.assertIn("CONFIG_UNRELATED=n\n", self.output.with_suffix(".draft").read_text())
+        send("r")
+        shown("Manual choice released")
+        send("u")
+        row("y", "n", "CONFIG_UNRELATED")
+        send("/always", "Enter", "i", "n", "A")
+        shown("cannot apply:")
+        self.assertFalse(self.output.exists())
+        send("c", "u")
+        shown("Undone")
+        send(":w", "Enter")
+        shown("Draft saved")
+        send("/unrelated", "Enter", "i", "y", "q")
+        shown("Discard unsaved edits?")
+        send("y")
+        wait(lambda: screen().returncode != 0)
+        self.assertFalse(self.output.exists())
+
+        launch()
+        shown("Kernel configuration editor")
+        send("/unrelated", "Enter")
+        row("y", "n", "CONFIG_UNRELATED")
+        send("/does_not_exist", "Enter")
+        shown("No matching options")
+        send("Escape")
+        wait(lambda: "No matching options" not in screen().stdout)
+        send("d", "g", "g", "j", "G", "k", ":wq", "Enter")
         wait(lambda: (self.output / "requested.config").exists())
-        self.assertIn("CONFIG_LATE=y", self.result("requested.config"))
-        self.assertNotIn("late-io", self.result("modules-load.late"))
-        self.assertIn("rejected in review", self.result("report.tsv"))
-        self.assertEqual(self.result("changes.tsv"), "CONFIG_IDLE\ty\tn\n")
+        self.assertEqual(self.result("changes.tsv"), "CONFIG_LATE\ty\tm\nCONFIG_UNRELATED\ty\tn\n")
+        self.assertEqual(self.result("overrides.tsv"), "CONFIG_IDLE\ty\tforced\nCONFIG_UNRELATED\tn\tmanual\n")
+        self.assertIn("CONFIG_IDLE=y", self.result("requested.config").splitlines())
+        self.assertEqual(self.result("modules-load.late"), "already\nlate-io\n")
 
 
 if __name__ == "__main__":

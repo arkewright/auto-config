@@ -71,6 +71,11 @@ IFS= read -r symbol < "$2" && printf ' U %s\\n' "$symbol"
         self.assertIn(f'#define KCFG_LINK_NAME "{name}"\n', (self.campaign / "bridge-config.h").read_text())
         self.assertLessEqual(len(name), 55)
 
+    def test_automatic_inventory_can_trim_covered_unused_options(self):
+        self.prepare("--default-policy", "drop")
+        units = DATA["read_scope"](self.campaign / "scope.tsv", self.linux)
+        self.assertEqual([(u.symbol, u.policy) for u in units], [("CONFIG_BAR", "drop"), ("CONFIG_FOO", "drop")])
+
     def test_requires_profile_settings_and_unambiguous_policy(self):
         for opts in (("--drop", "CONFIG_MISSING"), ("--defer", "CONFIG_FOO", "--drop", "CONFIG_FOO")):
             with self.subTest(opts=opts):
@@ -181,6 +186,40 @@ IFS= read -r symbol < "$2" && printf ' U %s\\n' "$symbol"
         self.assertIn("unauthorized configuration change: CONFIG_FOO", self.candidate(check=False).stderr)
         (self.plan / "changes.tsv").write_text("CONFIG_BAR\tm\tn\nCONFIG_NAME\ty\tn\n")
         self.assertIn("unauthorized configuration change: CONFIG_NAME", self.candidate(check=False).stderr)
+
+    def test_manual_and_forced_edits_can_override_policy_but_not_normalization(self):
+        self.reviewed()
+        (self.plan / "changes.tsv").write_text("CONFIG_BAR\tm\ty\nCONFIG_FOO\ty\tm\nCONFIG_EXTRA\tn\ty\n")
+        (self.plan / "overrides.tsv").write_text("CONFIG_BAR\ty\tmanual\nCONFIG_FOO\tm\tforced\n"
+                                                "CONFIG_MODULES\ty\tforced\nCONFIG_EXTRA\ty\tmanual\n")
+        actual = self.base.read_text().replace("CONFIG_FOO=y", "CONFIG_FOO=m").replace("CONFIG_BAR=m", "CONFIG_BAR=y")
+        self.actual.write_text(actual + "CONFIG_EXTRA=y\n")
+        self.assertIn("invalid deferred-module list", self.candidate(check=False).stderr)
+        (self.plan / "modules-load.late").write_text("")
+        self.candidate()
+        self.actual.write_text(actual)
+        self.assertIn("CONFIG_EXTRA: y -> n", self.candidate(check=False).stderr)
+        self.actual.write_text((actual + "CONFIG_EXTRA=y\n").replace("CONFIG_MODULES=y\n", ""))
+        self.assertIn("CONFIG_MODULES: y -> n", self.candidate(check=False).stderr)
+
+    def test_candidate_requires_consistent_tristate_overrides_and_unique_deltas(self):
+        self.reviewed()
+        overrides = self.plan / "overrides.tsv"
+        for row, error in (("bad\tm\tmanual", "invalid explicit setting"),
+                           ("CONFIG_FOO\tm\tauto", "invalid explicit setting"),
+                           ("CONFIG_NAME\tn\tmanual", "invalid explicit setting"),
+                           ("CONFIG_FOO\tx\tforced", "invalid explicit setting"),
+                           ("CONFIG_FOO\tm\tforced\nCONFIG_FOO\ty\tmanual", "invalid explicit setting"),
+                           ("CONFIG_FOO\ty\tmanual", "unauthorized configuration change"),
+                           ("CONFIG_EXTRA\ty\tforced", "explicit setting missing")):
+            with self.subTest(row=row):
+                overrides.write_text(row + "\n")
+                self.assertIn(error, self.candidate(check=False).stderr)
+        overrides.write_text("CONFIG_EXTRA\tn\tforced\n")
+        self.candidate()
+        delta = self.plan / "changes.tsv"
+        delta.write_text(delta.read_text() + "CONFIG_BAR\tm\tn\n")
+        self.assertIn("unauthorized configuration change: CONFIG_BAR", self.candidate(check=False).stderr)
 
     def test_candidate_requires_the_reviewed_deferred_modules(self):
         self.reviewed()

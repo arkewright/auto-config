@@ -213,6 +213,32 @@ std::optional<bool> bit(Text const value) {
 
 } // namespace
 
+Result<Opinions> parseOpinions(Text const text) {
+    Opinions opinions;
+    auto lines = Lines{text};
+    while (auto row = lines.next()) {
+        auto const first = row->find_first_not_of(" \t\r");
+        if (first == Text::npos) continue;
+        auto const line = row->substr(first, row->find_last_not_of(" \t\r") - first + 1);
+        Text name;
+        auto value = Setting::no;
+        if (line.starts_with("# CONFIG_") and line.ends_with(" is not set")) {
+            name = line.substr(2, line.size() - 2 - Text{" is not set"}.size());
+        } else if (line.starts_with('#')) continue;
+        else {
+            auto const eq = line.find('=');
+            if (eq == Text::npos) return lines.error("expected CONFIG_NAME=y/m/n");
+            name = line.substr(0, eq);
+            value = setting(line.substr(eq + 1));
+        }
+        if (not symbolName(name) or value == Setting::other)
+            return lines.error("expected CONFIG_NAME=y/m/n");
+        if (not opinions.emplace(name, value).second)
+            return lines.error("duplicate opinion for " + std::string{name});
+    }
+    return opinions;
+}
+
 Result<Campaign> parseCampaign(CampaignText const &inputs) {
     auto const id = parseCampaignId(inputs.id);
     if (not id) return std::unexpected{"campaign.id: expected 64 lowercase hexadecimal digits and LF"};

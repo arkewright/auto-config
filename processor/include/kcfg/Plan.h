@@ -58,16 +58,7 @@ struct Evidence {
     std::size_t total{};
 };
 
-struct Choice {
-    std::string symbol;
-    std::string module;
-    Evidence evidence;
-    Setting before;
-    Setting after;
-    std::string_view reason;
-    bool loadLate{};
-    bool accepted{};
-};
+using Opinions = std::map<std::string, Setting>;
 
 struct Bundle {
     std::string identity;
@@ -75,14 +66,13 @@ struct Bundle {
     std::string changes;
     std::string lateModules;
     std::string report;
+    std::string overrides;
 };
 
+Result<Opinions> parseOpinions(std::string_view text);
 Result<Campaign> parseCampaign(CampaignText const &inputs);
 Result<std::vector<Hits>> parseTrace(std::string_view trace, Campaign const &campaign);
 void includeHits(Hits &all, Hits next);
-std::vector<Choice> propose(Campaign const &campaign, std::vector<Hits> const &hits);
-Bundle materialize(Campaign const &campaign, std::vector<Choice> const &choices);
 std::string_view settingText(Setting value);
-bool actionable(Choice const &choice);
 
 } // namespace kcfg

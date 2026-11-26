@@ -57,7 +57,7 @@ boot profile profile --module "$output/profile/driver/kcfg_collect.ko"
 # ELF executes in both windows; the config reader only in the workload; CP850 in neither.
 diff -u <(printf '1\t1\t1\n2\t0\t1\n3\t0\t0\n') \
     <(rg '^\d+\t' "$output/guests/profile/trace.tsv" | cut -f1-3 | sort -n)
-"${cli[@]}" --plan
+"${cli[@]}" --plan --batch
 diff -u <(printf 'CONFIG_IKCONFIG\ty\tm\nCONFIG_NLS_CODEPAGE_850\ty\tn\n') <(sort "$output/plan/changes.tsv")
 diff -u <(printf 'configs\n') "$output/plan/modules-load.late"
 "${cli[@]}" --build-kernel candidate

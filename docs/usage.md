@@ -10,7 +10,8 @@
 | `./kcfg --build-tools` | 按 `LLVM_MODE` 复用或构建 LLVM、Clang 和 LLD，再构建主机插件与配置处理器。 |
 | `./kcfg --build-kernel` | 默认构建 `profile`：生成配置、插桩、编译镜像和采集驱动，并写出一个部署包。 |
 | `./kcfg --build-kernel baseline` | 使用相同基线设置构建和打包无插桩的对照内核。 |
-| `./kcfg --plan` | 读取本次采集构建的元数据和传回的快照，生成 `$WORK/plan/`。加 `--review` 可在终端撤回建议后再保存。 |
+| `./kcfg --plan` | 打开原配置与当前配置的对照编辑器。按 `a` 分析，按 `s` 存草稿，按 `A` 应用到 `$WORK/plan/`。 |
+| `./kcfg --plan --batch` | 无终端时从基线、强制意见和快照直接分析并应用；忽略交互草稿。 |
 | `./kcfg --build-kernel candidate` | 对处理器提出的配置运行 `olddefconfig`，构建无插桩内核，输出部署包和 `$WORK/candidate/.config`。 |
 
 `./kcfg --help` 可直接查看命令。多块板可以各存一份完整配置，例如 `./kcfg --env /data/visionfive.env --build-kernel`。`--env` 放在动作前；配置内的相对路径以仓库根目录为准。发行包和目标设备都不需要这份文件。
@@ -73,13 +74,13 @@ DROP=(CONFIG_NLS_CODEPAGE_850)
 DEFER=(CONFIG_IKCONFIG)
 ```
 
-这是授权示例。`DROP` 允许关闭启动及负载都未使用的组件，`DEFER` 允许将启动未用的组件改为模块。无论策略如何，启动命中或覆盖不足都会保留原值。两组均为空时，自动识别的选项全部按 `keep` 观测。
+填写名单时，只观测列出的组件。`DROP` 允许关闭启动及负载都未命中的选项；`DEFER` 允许将启动未用的组件改为模块。两组均为空时，模板的 `INVENTORY_POLICY=drop` 让自动发现的组件参与分析，设为 `keep` 则只观测。已有采集清单保留其原策略。自动分析只使用覆盖完整的选项，且保留启动命中的原值。
 
 设置 `SCOPE=/data/scope.tsv` 会改用指定清单。其[五列示例](../examples/qemu.scope.tsv)依次是从 1 开始的编号、Kconfig 名、模块名或 `-`、策略和相对 C 文件路径，用制表符分隔。聚合或条件规则不能直接识别时，用这份清单说明实际归属。
 
-`TRACE` 是第一份快照，默认 `$WORK/trace.tsv`。其他启动取得的同构建快照可写成 `EXTRA_TRACES=(/data/second.tsv /data/third.tsv)`。`--plan` 将命中取并集后决策。`--plan --review` 中用方向键选项、空格调整、`s` 保存、`q` 取消。处理器每次写入新的 `plan/`；要重新审阅，先移走上一份方案。
+`TRACE` 是第一份快照，默认 `$WORK/trace.tsv`。其他启动取得的同构建快照可写成 `EXTRA_TRACES=(/data/second.tsv /data/third.tsv)`。`FORCE_CONFIG` 可指向每行一个 `CONFIG_名称=y/m/n` 赋值的文件。`DEPENDENCY_GRAPH` 可指定同一源码、架构和基线的解析器导出文件；留空时，主机通过 `uv` 运行外部解析器生成依赖图。
 
-`plan/report.tsv` 解释决定，`plan/requested.config` 是请求，`plan/modules-load.late` 列出计划延迟加载的模块。候选构建核对 Kconfig 实际取值，成功后的 `$WORK/candidate/.config` 才是最终配置。
+`--plan` 中按 `/` 搜索，按 `i` 修改选项，按 `?` 查看[完整操作](../processor/README.md)。草稿保存在 `$WORK/plan.draft`；应用写入新的 `plan/`。`report.tsv` 解释决定，`requested.config` 是请求，`modules-load.late` 列出计划延迟加载的模块。候选构建核对实际取值，成功后的 `$WORK/candidate/.config` 是最终配置。
 
 ## 部署包和板端脚本
 

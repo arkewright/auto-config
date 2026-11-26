@@ -203,13 +203,43 @@ p.write_text('\\n'.join(lines) + '\\n')
             self.assertFalse(any("/dtbs/" in n or "/modules/" in n for n in bundle.getnames()))
         self.assertFalse(self.log.exists())
 
-    def test_trace_settings_and_review_forward_to_processor(self):
+    def test_editor_and_batch_use_supplied_graph_without_exporting(self):
         self.executable(self.host / "processor/kcfg-plan", '#!/bin/sh\nprintf "%s\\n" "$@"\n')
-        other = self.base / "second trace.tsv"
-        self.settings(EXTRA_TRACES=[str(other)])
-        self.assertEqual(self.cli("--plan", "--review").stdout.splitlines(),
-                         [str(self.work / "profile/campaign"), str(self.work / "trace.tsv"), str(self.work / "plan"),
-                          "--also", str(other), "--review"])
+        self.executable(self.bin / "uv", '#!/bin/sh\nexit 72\n')
+        other, graph, locks = (self.base / name for name in ("second trace.tsv", "board graph.tsv", "locked.config"))
+        self.settings(EXTRA_TRACES=[str(other)], DEPENDENCY_GRAPH=os.path.relpath(graph, ROOT), FORCE_CONFIG=locks)
+        expected = [str(self.work / "profile/campaign"), str(self.work / "trace.tsv"), str(self.work / "plan"),
+                    "--graph", str(graph), "--force", str(locks), "--also", str(other)]
+        self.assertEqual(self.cli("--plan").stdout.splitlines(), expected)
+        self.assertEqual(self.cli("--plan", "--batch").stdout.splitlines(), [*expected, "--batch"])
+
+    def test_plan_exports_from_capture_environment_when_graph_is_unspecified(self):
+        self.executable(self.host / "processor/kcfg-plan", '#!/bin/sh\nprintf "%s\\n" "$@"\n')
+        self.executable(self.bin / "uv", f'''#!{sys.executable} -I
+import json, os, sys
+from pathlib import Path
+Path(os.environ['LOG']).write_text(json.dumps([sys.argv[1:], [os.environ[k] for k in ('ARCH', 'CC', 'LD', 'KCFLAGS')]]))
+''')
+        ld = self.base / "custom linker"
+        self.settings(ARCH="riscv", KBUILD_ARGS=[f"LD={ld}", "KCFLAGS=-O2 -g0"])
+        campaign = self.work / "profile/campaign"
+        graph = campaign / "dependencies.tsv"
+        recorded = self.work / "profile/kernel/include/config/auto.conf.cmd"
+        recorded.parent.mkdir(parents=True)
+        recorded.touch()
+        for native in (True, False):
+            with self.subTest(native=native):
+                self.assertEqual(self.cli("--plan", "--batch").stdout.splitlines(),
+                                 [str(campaign), str(self.work / "trace.tsv"), str(self.work / "plan"),
+                                  "--graph", str(graph), "--batch"])
+                args, env = json.loads(self.log.read_text())
+                self.assertEqual(args, ["run", "--script", str(ROOT / "scripts/export_graph.py"),
+                                        "--linux", str(self.deps / "linux"), "--config", str(campaign / "baseline.config"),
+                                        "--arch", "riscv", "--output", str(graph),
+                                        *(["--kbuild-env", str(recorded)] if native else [])])
+                self.assertEqual(env, ["riscv", str(self.deps / "llvm/bin/clang"), str(ld), "-O2 -g0"])
+            if native:
+                recorded.unlink()
 
     def test_deferred_modules_require_modules_build_target(self):
         self.sdk()

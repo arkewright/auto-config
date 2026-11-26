@@ -20,7 +20,7 @@ if(NOT TARGET ftxui::component)
   endif()
 endif()
 
-add_library(kcfg_plan_core OBJECT src/Inputs.cpp src/Decision.cpp)
+add_library(kcfg_plan_core OBJECT src/Inputs.cpp src/Graph.cpp src/Decision.cpp src/Session.cpp)
 target_include_directories(kcfg_plan_core PUBLIC include)
 add_executable(kcfg-plan src/main.cpp src/Storage.cpp src/Review.cpp)
 target_link_libraries(kcfg-plan PRIVATE kcfg_plan_core ftxui::component)
@@ -33,6 +33,19 @@ endforeach()
 
 if(BUILD_TESTING)
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_executable(kcfg-session-test tests/session.cpp)
+  target_link_libraries(kcfg-session-test PRIVATE kcfg_plan_core)
+  add_test(NAME kcfg-session COMMAND kcfg-session-test)
   add_test(NAME kcfg-plan-contract COMMAND "${Python3_EXECUTABLE}" -I
     "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract.py" "$<TARGET_FILE:kcfg-plan>")
+  set(KCFG_NATIVE_CONF "" CACHE FILEPATH "Built Linux conf for the optional parser comparison test")
+  if(KCFG_NATIVE_CONF)
+    add_test(NAME kcfg-native-dependencies COMMAND "${Python3_EXECUTABLE}" -I
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/graph_export.py" "$<TARGET_FILE:kcfg-plan>" "${KCFG_NATIVE_CONF}")
+  endif()
+  find_program(TMUX_EXECUTABLE tmux)
+  if(TMUX_EXECUTABLE)
+    add_test(NAME kcfg-editor-terminal COMMAND "${Python3_EXECUTABLE}" -I
+      "${CMAKE_CURRENT_SOURCE_DIR}/tests/contract.py" "$<TARGET_FILE:kcfg-plan>" --tmux Contract.test_editor_in_terminal)
+  endif()
 endif()

@@ -76,6 +76,12 @@ struct StagingDirectory {
         return {};
     }
 
+    Result<void> publishDraft(fs::path const &destination) const {
+        if (::rename((path / "draft").c_str(), destination.c_str()) != 0)
+            return std::unexpected{failure(destination, errno)};
+        return {};
+    }
+
     Result<void> publish(fs::path const &destination) {
         if (::renameat2(AT_FDCWD, path.c_str(), AT_FDCWD, destination.c_str(), RENAME_NOREPLACE) != 0)
             return std::unexpected{failure(destination, errno)};
@@ -114,6 +120,41 @@ Result<std::vector<Hits>> readRuns(Campaign const &campaign, std::span<fs::path 
     return combined;
 }
 
+Result<std::unique_ptr<DependencyGraph>> readGraph(fs::path const &path) {
+    auto bytes = readFile(path, 128 * kMiB);
+    if (not bytes) return std::unexpected{bytes.error()};
+    auto graph = parseGraph(*bytes);
+    if (not graph) return std::unexpected{path.string() + ": " + graph.error()};
+    return graph;
+}
+
+Result<Opinions> readOpinions(fs::path const &path) {
+    auto bytes = readFile(path, 4 * kMiB);
+    if (not bytes) return std::unexpected{bytes.error()};
+    auto opinions = parseOpinions(*bytes);
+    if (not opinions) return std::unexpected{path.string() + ": " + opinions.error()};
+    return opinions;
+}
+
+Result<void> loadDraft(fs::path const &path, Session &session) {
+    std::error_code ec;
+    if (not fs::exists(path, ec) and not ec) return {};
+    auto bytes = readFile(path, 4 * kMiB);
+    if (not bytes) return std::unexpected{bytes.error()};
+    if (auto ok = session.restoreDraft(*bytes); not ok) return std::unexpected{path.string() + ": " + ok.error()};
+    return {};
+}
+
+Result<void> saveDraft(fs::path const &path, Session &session) {
+    auto pattern = (path.parent_path() / ".kcfg-draft-XXXXXX").string();
+    if (not ::mkdtemp(pattern.data())) return std::unexpected{failure(path.parent_path(), errno)};
+    auto stage = StagingDirectory{pattern};
+    if (auto ok = stage.write("draft", session.draftText()); not ok) return ok;
+    if (auto ok = stage.publishDraft(path); not ok) return ok;
+    session.markSaved();
+    return {};
+}
+
 Result<void> publishNew(fs::path const &destination, Bundle const &bundle) {
     auto target = destination;
     while (target.has_relative_path() and target.filename().empty()) target = target.parent_path();
@@ -123,8 +164,9 @@ Result<void> publishNew(fs::path const &destination, Bundle const &bundle) {
     if (not ::mkdtemp(pattern.data())) return std::unexpected{failure(target.parent_path(), errno)};
     auto stage = StagingDirectory{pattern};
     using File = std::pair<std::string_view, std::string const *>;
-    for (auto const &[name, data] : std::array<File, 5>{{{"campaign.id", &bundle.identity}, {"requested.config", &bundle.config},
-            {"changes.tsv", &bundle.changes}, {"modules-load.late", &bundle.lateModules}, {"report.tsv", &bundle.report}}}) {
+    for (auto const &[name, data] : std::array<File, 6>{{{"campaign.id", &bundle.identity}, {"requested.config", &bundle.config},
+            {"changes.tsv", &bundle.changes}, {"modules-load.late", &bundle.lateModules}, {"report.tsv", &bundle.report},
+            {"overrides.tsv", &bundle.overrides}}}) {
         auto const written = stage.write(name, *data);
         if (not written) return written;
     }

@@ -104,7 +104,7 @@ def literal_bindings(directory):
     return bindings
 
 
-def inventory(linux, drop, defer):
+def inventory(linux, drop, defer, default_policy):
     drop, defer = set(drop), set(defer)
     if drop & defer:
         raise ValueError("conflicting policies: " + ", ".join(sorted(drop & defer)))
@@ -132,7 +132,7 @@ def inventory(linux, drop, defer):
         if selected and symbol not in selected:
             continue
         name = module if counts[symbol] == 1 and len(owners[module]) == 1 and re.fullmatch(MODULE, module) else "-"
-        policy = "drop" if symbol in drop else "defer" if symbol in defer else "keep"
+        policy = "defer" if symbol in defer else "drop" if symbol in drop else default_policy
         if policy == "defer" and name == "-":
             raise ValueError(f"no unique module for {symbol}; supply a scope file")
         units.append(Unit(symbol, name, policy, path))
@@ -195,7 +195,7 @@ def prepare(args):
     linux, campaign = args.linux.resolve(), args.campaign.resolve()
     if args.scope and (args.drop or args.defer):
         raise ValueError("choose a scope file or drop/defer policies")
-    units = read_scope(args.scope, linux) if args.scope else inventory(linux, args.drop, args.defer)
+    units = read_scope(args.scope, linux) if args.scope else inventory(linux, args.drop, args.defer, args.default_policy)
     campaign.mkdir(parents=True)
     (campaign / "receipts").mkdir()
     shutil.copyfile(args.config, campaign / "baseline.config")
@@ -292,6 +292,20 @@ def coverage(args):
     (campaign / "build.json").write_text(json.dumps({"arch": args.arch, "release": release}, indent=2) + "\n")
 
 
+def explicit_settings(plan, baseline):
+    try:
+        rows = (plan / "overrides.tsv").read_text().splitlines()
+    except FileNotFoundError:
+        return {}
+    values = {}
+    for row in rows:
+        match = re.fullmatch(rf"({SYMBOL})\t([nmy])\t(forced|manual)", row)
+        if not match or match[1] in values or baseline.get(match[1], "n") not in {"y", "m", "n"}:
+            raise ValueError(f"invalid explicit setting: {row}")
+        values[match[1]] = match[2]
+    return values
+
+
 def candidate(args):
     campaign, plan = args.campaign, args.plan
     if read_campaign_id(campaign) != read_campaign_id(plan):
@@ -306,22 +320,32 @@ def candidate(args):
         if sites.get(i, 0) <= 0 or u.symbol == "CONFIG_MODULES":
             allowed[u.symbol] = "keep"
 
-    expected = baseline.copy()
+    overrides = explicit_settings(plan, baseline)
+    changes = {}
+    automatic = {("defer", "y", "m"), ("drop", "y", "n"), ("drop", "m", "n")}
     for row in (plan / "changes.tsv").read_text().splitlines():
-        key, old, new = row.split("\t")
-        if expected.get(key) != old or (allowed.get(key), old, new) not in {
-                ("defer", "y", "m"), ("drop", "y", "n"), ("drop", "m", "n")}:
+        match = re.fullmatch(rf"({SYMBOL})\t([nmy])\t([nmy])", row)
+        if not match:
+            raise ValueError(f"invalid configuration change: {row}")
+        key, old, new = match.groups()
+        authorized = overrides[key] == new if key in overrides else (allowed.get(key), old, new) in automatic
+        if key in changes or old == new or baseline.get(key, "n") != old or not authorized:
             raise ValueError(f"unauthorized configuration change: {row}")
-        expected[key] = new
+        changes[key] = new
+    expected = baseline | changes
+    for key, value in overrides.items():
+        if expected.get(key, "n") != value:
+            raise ValueError(f"explicit setting missing from reviewed changes: {key}={value}")
     actual = config_values(args.config)
     for key in sorted(expected.keys() | actual.keys()):
         want, got = expected.get(key, "n"), actual.get(key, "n")
         if want != got:
             raise ValueError(f"normalized configuration differs from reviewed changes: {key}: {want} -> {got}")
-    eligible = {u.module for u in units if allowed[u.symbol] == "defer" and actual.get(u.symbol) == "m"}
-    converted = {u.module for u in units if baseline.get(u.symbol) == "y" and actual.get(u.symbol) == "m"}
+    eligible = {u.module: u.symbol for u in units if allowed[u.symbol] == "defer" and u.symbol not in overrides
+                and actual.get(u.symbol) == "m"}
+    converted = {module for module, symbol in eligible.items() if baseline.get(symbol) == "y"}
     late = (plan / "modules-load.late").read_text().splitlines()
-    if len(late) != len(set(late)) or not converted <= set(late) <= eligible:
+    if len(late) != len(set(late)) or not converted <= set(late) <= eligible.keys():
         raise ValueError("invalid deferred-module list")
 
 
@@ -336,6 +360,7 @@ def main():
     start.add_argument("--cc", required=True)
     start.add_argument("--plugin", required=True, type=Path)
     start.add_argument("--scope", type=Path)
+    start.add_argument("--default-policy", choices=("keep", "drop"), default="keep")
     start.add_argument("--drop", action="append", default=[])
     start.add_argument("--defer", action="append", default=[])
     finish = sub.add_parser("coverage", parents=[common])

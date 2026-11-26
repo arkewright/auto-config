@@ -13,7 +13,7 @@ sudo apt update
 sudo apt install build-essential git cmake ninja-build python3 bc flex bison libelf-dev libssl-dev dwarves kmod cpio rsync zstd lz4 lzop xz-utils openssh-client
 ```
 
-宿主工程使用 CMake 3.30 或更新版本、Python 3.11 或更新版本。若系统自带的 CMake 较旧，可运行 `sudo apt install pipx && pipx install 'cmake>=3.30'`，并将 `$HOME/.local/bin` 加到 `PATH`。板端需要 `initramfs-tools`、`kmod` 及现有 GRUB 提供的 `update-grub`。
+宿主工程使用 CMake 3.30 或更新版本、Python 3.11 或更新版本。自动导出依赖图还需要 `uv`；在 `.env` 中指定已有的 `DEPENDENCY_GRAPH` 可直接读取。若系统自带的 CMake 较旧，可运行 `sudo apt install pipx && pipx install 'cmake>=3.30'`，并将 `$HOME/.local/bin` 加到 `PATH`。板端需要 `initramfs-tools`、`kmod` 及现有 GRUB 提供的 `update-grub`。
 
 在主机仓库根目录执行：
 
@@ -25,7 +25,7 @@ ${EDITOR:-vi} .env
 首次实验先确定两件事：
 
 1. 用什么基线？`KERNEL_CONFIG=''` 表示原生 `allyesconfig` 加采集开关。已有能启动这块板的完整配置时，填写主机上的路径，例如 `KERNEL_CONFIG=/src/board.config`；脚本复制它并运行 `olddefconfig`。内核配置和镜像格式要能启动本板、挂载根盘并使用 initramfs。
-2. 哪些组件允许改动？在 `DROP=(...)` 中写允许关闭的配置，在 `DEFER=(...)` 中写允许推迟加载的配置。两者均为空时只观测、全部保留。例如，允许推迟 `/proc/config.gz` 的读取模块可写 `DEFER=(CONFIG_IKCONFIG)`。
+2. 哪些组件参与分析？默认观测自动发现的组件，覆盖完整且启动、负载均未命中的选项才参与关闭。要限定范围，将选项写入 `DROP=(...)` 或 `DEFER=(...)`。例如，允许推迟 `/proc/config.gz` 的读取模块可写 `DEFER=(CONFIG_IKCONFIG)`。板子必须保留的开关可以写入 `FORCE_CONFIG` 指向的文件。
 
 其余项可保留默认值。已有源码或 LLVM 工具链时，在同一文件指定位置，见[脚本参考](usage.md)。
 
@@ -80,7 +80,7 @@ scp ubuntu@board:~/capture-01/trace.tsv build/board/trace.tsv
 scp build/board/packages/kernel-candidate.tar.gz ubuntu@board:~/
 ```
 
-`build/board/plan/report.tsv` 解释每个配置项的决定。要先在终端审阅，将第二条换为 `./kcfg --plan --review`。候选构建完成后的配置是 `build/board/candidate/.config`。
+第二条命令进入编辑器。按 `a` 分析，按 `d` 只看差异，按 `A` 应用后再构建候选。`build/board/plan/report.tsv` 记录保留和修改的理由；`build/board/candidate/.config` 是候选构建实际采用的配置。
 
 ## 板端：回放同一负载
 
