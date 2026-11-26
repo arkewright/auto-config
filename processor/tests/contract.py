@@ -382,6 +382,29 @@ class Contract(unittest.TestCase):
         self.ok("--graph", graph)
         self.assertEqual(self.result("changes.tsv"), "CONFIG_IDLE\ty\tn\nCONFIG_LATE\ty\tm\n")
 
+    def test_architecture_absent_targets_do_not_constrain_the_selector(self):
+        graph = self.with_rules("select\tCONFIG_USED\tCONFIG_FOREIGN\ty", "imply\tCONFIG_USED\tCONFIG_FOREIGN\ty\tn\ty",
+                                "absent\tCONFIG_FOREIGN", "select\tCONFIG_USED\tCONFIG_IDLE\ty")
+        self.ok("--graph", graph)
+        config = self.result("requested.config")
+        self.assertNotIn("CONFIG_FOREIGN", config)
+        self.assertIn("CONFIG_IDLE=y", config.splitlines())  # The other target of the same selector is real.
+
+    def test_select_still_requires_declared_target_omitted_from_config(self):
+        graph = self.with_rules("select\tCONFIG_USED\tCONFIG_ABSENT\ty")
+        self.refused("--graph", graph, diagnostic="CONFIG_USED selects CONFIG_ABSENT")
+
+    def test_architecture_absent_symbol_cannot_satisfy_a_dependency_or_be_forced(self):
+        graph = self.with_rules("absent\tCONFIG_FOREIGN", "depends\tCONFIG_USED\tCONFIG_FOREIGN")
+        self.refused("--graph", graph, diagnostic="CONFIG_USED depends on CONFIG_FOREIGN")
+        self.refused("--graph", graph, "--force", self.force("CONFIG_FOREIGN=y"), diagnostic="not a declared")
+
+    def test_absent_target_does_not_hide_malformed_graph_references(self):
+        for rule, unknown in [("select\tCONFIG_USED\tCONFIG_TYPO\ty", "CONFIG_TYPO"),
+                              ("select\tCONFIG_USED\tCONFIG_FOREIGN\tCONFIG_BAD_COND", "CONFIG_BAD_COND")]:
+            graph = self.with_rules("absent\tCONFIG_FOREIGN", rule)
+            self.refused("--graph", graph, diagnostic=f"undeclared symbol: {unknown}")
+
     def test_conditional_select_evaluates_current_config(self):
         graph = self.with_rules("select\tCONFIG_USED\tCONFIG_IDLE\tCONFIG_UNRELATED")
         self.ok("--graph", graph)

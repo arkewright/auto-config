@@ -19,7 +19,7 @@ uv run --script scripts/export_graph.py \
 | 记录 | 后续字段 | 含义 |
 |---|---|---|
 | `symbol` | 名称、`bool` 或 `tristate`、可选的 `hidden` | 此架构定义的开关。`hidden` 表示在采集基线中没有可见提示，自动分析保留原值。 |
-| `absent` | 名称 | 反向依赖指向了本架构未定义的目标，其值为 `n`。 |
+| `absent` | 名称 | 目标在此架构没有定义，或只有无类型的占位声明。指向它的 `select` 和 `imply` 不施加约束；它在逻辑条件中取 `n`。 |
 | `modules` | 名称 | 控制模块支持的布尔开关。它为 `y` 时才允许模块值。 |
 | `depends` | 选项、表达式 | 表达式给出该选项的上限，包含外层菜单和条件继承的依赖。 |
 | `select` | 源选项、目标选项、条件表达式 | 源选项与条件的较小值给出目标的下限。目标自身的依赖仍单独检查。 |
@@ -29,7 +29,9 @@ uv run --script scripts/export_graph.py \
 
 表达式使用空格分隔的后缀记法：`CONFIG_B CONFIG_C ||` 表示 `B || C`，`CONFIG_B ! CONFIG_C &&` 表示 `!B && C`。操作数可以是已声明的选项或 `n`、`m`、`y`。运算符包括 `!`、`&&`、`||` 以及 `=`、`!=`、`<`、`<=`、`>`、`>=`。`n < m < y`，作用在布尔选项上的 `m` 依赖界限提升为 `y`。
 
-例如，下图允许关闭 `CONFIG_B` 和 `CONFIG_C` 中的任意一个；只要 `CONFIG_USED=y`，就必须保留其中一个：
+例如，`CONFIG_SYSFB` 选择 `CONFIG_BOOT_VESA_SUPPORT` 和 `CONFIG_SCREEN_INFO`。在 RISC-V 上，前者未定义，启用 `CONFIG_SYSFB` 只要求保留后者；在 x86 上两项目标都有定义，即使菜单不显示它们，也都要保留。
+
+下图允许关闭 `CONFIG_B` 和 `CONFIG_C` 中的任意一个；只要 `CONFIG_USED=y`，就必须保留其中一个：
 
 ```text
 KCFG-GRAPH	1

@@ -256,6 +256,8 @@ Result<std::unique_ptr<DependencyGraph>> parseGraph(Text text) {
             } else if ((kind == "select" and f.size() == 4) or (kind == "imply" and (f.size() == 4 or f.size() == 6))) {
                 LowerBound relation{lookup(names, f[1]), lookup(names, f[2]), compile(f[3], names), {}};
                 if (f.size() == 6) relation.hidden = HiddenTarget{compile(f[4], names), compile(f[5], names)};
+                // An architecture-absent target has no configurable value for select or imply to raise.
+                if (not graph->declarations[relation.target].available) continue;
                 if (kind == "select" or relation.hidden) graph->rules.emplace_back(std::move(relation));
             } else if (kind == "scalar" and f.size() == 3 and symbolName(f[1]) and not names.contains(f[1])) {
                 graph->rules.emplace_back(Scalar{std::string{f[1]}, compile(f[2], names)});

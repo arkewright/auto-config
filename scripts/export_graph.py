@@ -164,23 +164,23 @@ def records(tree):
             yield ("depends", name(s), dep)
         for kind, properties in (("select", s.selects), ("imply", s.implies)):
             for target, condition in properties:
-                if target.orig_type not in SWITCHES:
-                    if target.nodes:
-                        raise ValueError(f"{s.name} {kind}s non-switch {target.name}")
+                if target.orig_type == kc.UNKNOWN:
                     if target not in absent:
-                        yield ("absent", name(target))  # Cross-architecture targets can have no definition here.
+                        yield ("absent", name(target))  # A shared default can have no type on this architecture.
                         absent.add(target)
+                elif target.orig_type not in SWITCHES:
+                    raise ValueError(f"{s.name}: {kind} target {target.name} is not a bool or tristate")
                 if target.choice:
                     raise ValueError(f"unsupported {kind} of choice member {target.name} by {s.name}")
                 row = (kind, name(s), name(target), expr.expression(condition))
                 if kind == "imply":
                     visible = expr.prompts(target)
                     if visible != "y":
-                        limit = expr.expression(target.direct_dep) if target.nodes else "n"
+                        limit = expr.expression(target.direct_dep) if target.orig_type in SWITCHES else "n"
                         row += (visible, limit)
                 yield row
     for s in tree.unique_defined_syms:
-        if s.orig_type in SWITCHES:
+        if s.orig_type in SWITCHES or s.orig_type == kc.UNKNOWN:
             continue
         if s.orig_type not in (kc.INT, kc.HEX, kc.STRING) or s.selects or s.implies:
             raise ValueError(f"unsupported scalar declaration: {s.name_and_loc}")

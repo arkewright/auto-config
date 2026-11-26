@@ -30,6 +30,19 @@ config CONDITIONAL_DEP
 config BOOL_ON_M
 	bool "Boolean on a module"
 	depends on RIGHT
+config SYSFB_SIMPLEFB
+	bool "System framebuffer"
+	select SYSFB
+	imply ARCH_HELPER
+config SYSFB
+	bool
+	select BOOT_VESA_SUPPORT
+	select SCREEN_INFO
+config SCREEN_INFO
+	bool
+config ARCH_HELPER
+	default n
+source "Kconfig.$(ARCH)"
 config SELECTOR
 	tristate "Conditional selector"
 	select SELECTED if CONDITION
@@ -94,6 +107,7 @@ CONFIG_USED=y
 CONFIG_CONDITION=y
 CONFIG_CONDITIONAL_DEP=y
 CONFIG_BOOL_ON_M=y
+CONFIG_SYSFB_SIMPLEFB=y
 CONFIG_SELECTOR=m
 CONFIG_SELECTED=y
 # CONFIG_WEAK is not set
@@ -138,14 +152,16 @@ def values(config):
     return out
 
 
-def main(program, native):
+def compare_arch(program, native, arch, cases):
     with tempfile.TemporaryDirectory(prefix="kcfg-graph-test-") as tmp:
         root = Path(tmp)
         (root / "Kconfig").write_text(KCONFIG)
+        (root / "Kconfig.x86_64").write_text("config BOOT_VESA_SUPPORT\n\tbool\nconfig ARCH_HELPER\n\tbool\n")
+        (root / "Kconfig.riscv").write_text("")
 
         def normalize(path):
             subprocess.run([native, "--olddefconfig", root / "Kconfig"], cwd=root, check=True, capture_output=True,
-                           env={**os.environ, "KCONFIG_CONFIG": str(path)})
+                           env={**os.environ, "ARCH": arch, "KCONFIG_CONFIG": str(path)})
             return values(path.read_text())
 
         campaign = root / "capture"
@@ -161,10 +177,15 @@ def main(program, native):
         baseline = campaign / "baseline.config"
         baseline.write_text(BASE)
         original = normalize(baseline)
+        if original["CONFIG_SYSFB"] != "y" or original["CONFIG_SCREEN_INFO"] != "y":
+            raise AssertionError(f"{arch}: framebuffer selection is inactive")
+        for target in ("CONFIG_BOOT_VESA_SUPPORT", "CONFIG_ARCH_HELPER"):
+            if original.get(target) != ("y" if arch == "x86_64" else None):
+                raise AssertionError(f"{arch}: unexpected native value for {target}")
         graph = campaign / "dependencies.tsv"
         subprocess.run(["uv", "run", "--script", EXPORTER, "--linux", root, "--config", baseline,
-                        "--arch", "x86_64", "--output", graph], check=True)
-        for index, (changes, valid) in enumerate(CASES):
+                        "--arch", arch, "--output", graph], check=True)
+        for index, (changes, valid) in enumerate(cases):
             opinions = {"CONFIG_" + key: value for key, value in changes.items()}
             force = root / "opinion"
             force.write_text("".join(f"{key}={val}\n" for key, val in opinions.items()))
@@ -182,10 +203,19 @@ def main(program, native):
                 raise AssertionError(f"plan failed to honor {changes}")
             if not stable and (planned.exists() or "cannot apply" not in process.stderr):
                 raise AssertionError(f"wrong conflict diagnostic for {changes}: {process.stderr}")
-        print(f"{len(CASES)} graph decisions matched native olddefconfig")
+        print(f"{arch}: {len(cases)} graph decisions matched native olddefconfig")
 
 
 if __name__ == "__main__":
     if len(sys.argv) != 3:
         sys.exit(__doc__)
-    main(Path(sys.argv[1]).resolve(), Path(sys.argv[2]).resolve())
+    program, native = (Path(arg).resolve() for arg in sys.argv[1:])
+    off = {"SYSFB_SIMPLEFB": "n", "SYSFB": "n", "SCREEN_INFO": "n"}
+    compare_arch(program, native, "x86_64", [
+        *CASES,
+        ({"SCREEN_INFO": "n"}, False),
+        ({"BOOT_VESA_SUPPORT": "n"}, False),
+        ({"ARCH_HELPER": "n"}, False),
+        (off | {"BOOT_VESA_SUPPORT": "n", "ARCH_HELPER": "n"}, True),
+    ])
+    compare_arch(program, native, "riscv", [({}, True), ({"SCREEN_INFO": "n"}, False), (off, True)])
